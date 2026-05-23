@@ -136,6 +136,32 @@ GPU requirements (from openpi-agilex README):
 | Fine-tuning (LoRA) | > 22.5 GB | RTX 4090 |
 | Fine-tuning (full) | > 70 GB | A100 80 GB / H100 |
 
+## Bring-up findings (2026-05-22 / 23)
+
+Working motion confirmed: PiPER-X moves all 6 joints from macOS via
+`piper-sdk-rs` → candleLight → CAN. Three gotchas worth keeping:
+
+1. **Streaming, not single-shot.** Upstream `position_control_demo` sends
+   `send_position_command(&target)?` once and waits. The SDK reports "complete"
+   but the arm doesn't move on firmware S-V1.8-2. Stream the target at ~50 Hz
+   for the duration of the motion instead. See `examples/piper-sdk-rs-patches/`.
+2. **Teach mode is non-volatile.** If the arm gets stuck in drag-teach
+   (`control_mode=2`, `teach_status=1`), power-cycling won't clear it.
+   Send a raw CAN 0x150 with `teach_command=EndRecord (0x02)` —
+   our `exit_teach_mode` example does this. Without exiting teach,
+   `enable_position_mode` silently times out.
+3. **SDK timeouts are too tight.** Defaults: `firmware_timeout=100 ms`,
+   `feedback_timeout=5 s`, `DisableConfig.timeout=2 s`,
+   `PositionModeConfig.timeout=2 s`. On macOS/GS-USB we needed to bump these
+   to 5 s / 10 s / 15 s / 15 s respectively before init reliably succeeded.
+4. **Dongle gets stuck between runs.** Every failed/partial SDK init leaves
+   the candleLight in a state where the next run errors at
+   `Failed to set bitrate` or `Infrastructure(Timeout)`. Unplug + replug
+   between runs. Annoying but consistent.
+5. **macOS sudo:** added a sudoers drop-in for
+   `…/piper-sdk-rs/target/debug/examples/*` so the binaries run
+   password-less.
+
 ## Open items before the demo
 
 - Rail coordinate measurements (waiting on physical rails).

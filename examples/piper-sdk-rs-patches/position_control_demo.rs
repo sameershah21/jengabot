@@ -1,0 +1,411 @@
+//! 位置控制演示 - 完整的机械臂控制流程
+//!
+//! 这个示例展示了完整的机械臂控制流程：
+//! 1. 连接机械臂
+//! 2. 使能机械臂
+//! 3. 获取当前关节位置
+//! 4. 移动到目标位置
+//! 5. 保持一段时间
+//! 6. 移动回原位置
+//! 7. 失能机械臂
+//!
+//! 这是一个教学型示例：它用固定等待时间演示位置命令流程，
+//! 不把“sleep 结束”当作生产级的到位确认。
+//! 如果你需要按误差阈值、超时和重发策略确认运动完成，
+//! 请参考 `piper-control::workflow` 里的阻塞运动执行模式。
+//!
+//! # 运行
+//!
+//! ```bash
+//! # Linux (SocketCAN)
+//! cargo run -p piper-sdk --example position_control_demo -- --interface can0
+//!
+//! # macOS/Windows (GS-USB)
+//! cargo run -p piper-sdk --example position_control_demo -- --interface ABC123456
+//! ```
+
+use clap::Parser;
+use piper_sdk::client::state::MotionCapability;
+use piper_sdk::client::state::*;
+use piper_sdk::client::types::RobotError;
+use piper_sdk::client::{MotionConnectedPiper, MotionConnectedState};
+use piper_sdk::prelude::*;
+use std::time::{Duration, Instant};
+
+const INITIAL_MONITOR_SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(200);
+const INITIAL_MONITOR_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// 命令行参数
+#[derive(Parser, Debug)]
+#[command(name = "position_control_demo")]
+#[command(about = "位置控制演示 - 完整的机械臂控制流程")]
+struct Args {
+    /// CAN 接口名称或设备序列号
+    ///
+    /// - Linux: "can0"/"can1" 等 SocketCAN 接口名
+    /// - macOS/Windows: GS-USB 设备序列号
+    #[cfg_attr(target_os = "linux", arg(long, default_value = "can0"))]
+    #[cfg_attr(not(target_os = "linux"), arg(long))]
+    interface: String,
+
+    /// CAN 波特率（默认: 1000000）
+    #[arg(long, default_value = "1000000")]
+    baud_rate: u32,
+}
+
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // 初始化日志
+    piper_sdk::init_logger!();
+
+    let args = Args::parse();
+
+    println!("🤖 Piper SDK - 位置控制演示");
+    println!("============================\n");
+
+    // ==================== 步骤 1: 连接机械臂 ====================
+    println!("📡 步骤 1: 连接机械臂...");
+
+    // 使用新的 Builder API 连接（自动处理平台差异）
+    let robot = {
+        #[cfg(target_os = "linux")]
+        {
+            PiperBuilder::new()
+                .socketcan(&args.interface)
+                .baud_rate(args.baud_rate)
+                .build()?
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Use gs_usb_auto so we don't depend on serial number reporting
+            // (candleLight stops advertising serial after some reset cycles).
+            let _ = &args.interface;
+            PiperBuilder::new()
+                .gs_usb_auto()
+                .baud_rate(args.baud_rate)
+                .feedback_timeout(Duration::from_secs(10))
+                .firmware_timeout(Duration::from_secs(5))
+                .build()?
+        }
+    };
+    println!("   ✅ 连接成功\n");
+
+    let robot = robot.require_motion()?;
+    match robot {
+        MotionConnectedPiper::Strict(MotionConnectedState::Standby(robot)) => run_demo(robot)?,
+        MotionConnectedPiper::Soft(MotionConnectedState::Standby(robot)) => run_demo(robot)?,
+        MotionConnectedPiper::Strict(MotionConnectedState::Maintenance(robot)) => {
+            println!("⚠️  Arm in Maintenance — requesting disable_all then waiting for Standby...");
+            let robot = robot.request_disable_all()?;
+            let robot = robot.wait_until_disabled(DisableConfig {
+                timeout: Duration::from_secs(15),
+                ..DisableConfig::default()
+            })?;
+            println!("   ✅ Standby confirmed\n");
+            run_demo(robot)?
+        },
+        MotionConnectedPiper::Soft(MotionConnectedState::Maintenance(robot)) => {
+            println!("⚠️  Arm in Maintenance — requesting disable_all then waiting for Standby...");
+            let robot = robot.request_disable_all()?;
+            let robot = robot.wait_until_disabled(DisableConfig {
+                timeout: Duration::from_secs(15),
+                ..DisableConfig::default()
+            })?;
+            println!("   ✅ Standby confirmed\n");
+            run_demo(robot)?
+        },
+    }
+
+    Ok(())
+}
+
+fn run_demo<Capability>(
+    robot: Piper<Standby, Capability>,
+) -> std::result::Result<(), Box<dyn std::error::Error>>
+where
+    Capability: MotionCapability,
+{
+    // ==================== 步骤 2: 使能机械臂 ====================
+    println!("⚡ 步骤 2: 使能机械臂（位置模式）...");
+    let robot = robot.enable_position_mode(PositionModeConfig {
+        timeout: Duration::from_secs(15),
+        ..PositionModeConfig::default()
+    })?;
+    println!("   ✅ 使能成功\n");
+
+    // ==================== 步骤 3: 获取当前关节位置 ====================
+    println!("📍 步骤 3: 获取当前关节位置...");
+    let observer = robot.observer();
+    let current_positions = wait_for_monitor_snapshot(
+        INITIAL_MONITOR_SNAPSHOT_TIMEOUT,
+        INITIAL_MONITOR_SNAPSHOT_POLL_INTERVAL,
+        || observer.joint_positions(),
+    )?;
+
+    println!("   当前关节位置:");
+    for (i, pos) in current_positions.iter().enumerate() {
+        println!(
+            "     J{}: {:.4} rad ({:.2} deg)",
+            i + 1,
+            pos.0,
+            pos.to_deg().0
+        );
+    }
+    println!();
+
+    // ==================== 步骤 4: 移动到目标位置 ====================
+    println!("🎯 步骤 4: 移动到目标位置...");
+
+    // 定义目标位置（直接指定关节角度）
+    let target_positions = JointArray::from([
+        Rad(0.074125),    // J1
+        Rad(0.1162963),   // J2
+        Rad(-0.47472),    // J3
+        Rad(-0.67663265), // J4
+        Rad(0.77636364),  // J5
+        Rad(0.80553846),  // J6
+    ]);
+
+    println!("   目标关节位置:");
+    for (i, pos) in target_positions.iter().enumerate() {
+        println!(
+            "     J{}: {:.4} rad ({:.2} deg)",
+            i + 1,
+            pos.0,
+            pos.to_deg().0
+        );
+    }
+    println!();
+
+    // PATCH: stream position command continuously so the arm actually moves.
+    // Single-shot did not produce motion on our PiPER-X (S-V1.8-2) over GS-USB.
+    println!("   ▶ Streaming position command at 50 Hz for 10s...");
+    let move_start = Instant::now();
+    let move_duration = Duration::from_secs(10);
+    while move_start.elapsed() < move_duration {
+        robot.send_position_command(&target_positions)?;
+        std::thread::sleep(Duration::from_millis(20)); // 50 Hz
+    }
+    println!("   ✅ Streaming complete");
+
+    // 读取实际位置并验证
+    let actual_positions = observer.joint_positions()?;
+    println!("   ✅ 运动完成");
+    println!("\n   📊 目标位置 vs 实际位置对比:");
+    let mut max_error = 0.0;
+    let mut max_error_joint = 0;
+    for (i, (target, actual)) in target_positions.iter().zip(actual_positions.iter()).enumerate() {
+        let error = (target.0 - actual.0).abs();
+        let error_deg = error * 180.0 / std::f64::consts::PI;
+        if error > max_error {
+            max_error = error;
+            max_error_joint = i;
+        }
+        println!(
+            "     J{}: 目标={:.4} rad ({:.2} deg), 实际={:.4} rad ({:.2} deg), 误差={:.4} rad ({:.2} deg)",
+            i + 1,
+            target.0,
+            target.to_deg().0,
+            actual.0,
+            actual.to_deg().0,
+            error,
+            error_deg
+        );
+    }
+    println!(
+        "\n   📈 最大误差: J{} = {:.4} rad ({:.2} deg)\n",
+        max_error_joint + 1,
+        max_error,
+        max_error * 180.0 / std::f64::consts::PI
+    );
+
+    // ==================== 步骤 5: 保持位置一段时间 ====================
+    println!("⏸️  步骤 5: 保持位置 2 秒...");
+    let hold_start = Instant::now();
+    let hold_duration = Duration::from_secs(2);
+
+    // 在保持期间，持续发送位置命令以保持位置
+    while hold_start.elapsed() < hold_duration {
+        robot.send_position_command(&target_positions)?;
+        std::thread::sleep(Duration::from_millis(200)); // 5Hz 控制频率
+    }
+
+    // 验证保持后的位置
+    let hold_positions = observer.joint_positions()?;
+    println!("   ✅ 保持完成");
+    println!("\n   📊 保持后位置验证:");
+    for (i, (target, actual)) in target_positions.iter().zip(hold_positions.iter()).enumerate() {
+        let error = (target.0 - actual.0).abs();
+        let error_deg = error * 180.0 / std::f64::consts::PI;
+        println!(
+            "     J{}: 目标={:.4} rad ({:.2} deg), 实际={:.4} rad ({:.2} deg), 误差={:.4} rad ({:.2} deg)",
+            i + 1,
+            target.0,
+            target.to_deg().0,
+            actual.0,
+            actual.to_deg().0,
+            error,
+            error_deg
+        );
+    }
+    println!();
+
+    // ==================== 步骤 6: 移动回原位置 ====================
+    println!("🔙 步骤 6: 移动回原位置...");
+    println!("   ▶ Streaming return position command at 50 Hz for 10s...");
+    let return_start = Instant::now();
+    while return_start.elapsed() < Duration::from_secs(10) {
+        robot.send_position_command(&current_positions)?;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    println!("   ✅ Return motion complete\n");
+
+    // 验证是否回到原位置
+    let final_positions = observer.joint_positions()?;
+    println!("   最终关节位置（与初始位置对比）:");
+    let mut max_return_error = 0.0;
+    let mut max_return_error_joint = 0;
+    for (i, (final_pos, initial_pos)) in
+        final_positions.iter().zip(current_positions.iter()).enumerate()
+    {
+        let error = (final_pos.0 - initial_pos.0).abs();
+        let error_deg = error * 180.0 / std::f64::consts::PI;
+        if error > max_return_error {
+            max_return_error = error;
+            max_return_error_joint = i;
+        }
+        println!(
+            "     J{}: 初始={:.4} rad ({:.2} deg), 最终={:.4} rad ({:.2} deg), 误差={:.4} rad ({:.2} deg)",
+            i + 1,
+            initial_pos.0,
+            initial_pos.to_deg().0,
+            final_pos.0,
+            final_pos.to_deg().0,
+            error,
+            error_deg
+        );
+    }
+    println!(
+        "\n   📈 最大回位误差: J{} = {:.4} rad ({:.2} deg)\n",
+        max_return_error_joint + 1,
+        max_return_error,
+        max_return_error * 180.0 / std::f64::consts::PI
+    );
+
+    // ==================== 步骤 7: 失能机械臂 ====================
+    println!("🛑 步骤 7: 失能机械臂...");
+    let _robot = robot.disable(DisableConfig::default())?;
+    println!("   ✅ 失能成功\n");
+
+    println!("🎉 演示完成！");
+
+    Ok(())
+}
+
+fn wait_for_monitor_snapshot<T, Read>(
+    timeout: Duration,
+    poll_interval: Duration,
+    mut read: Read,
+) -> std::result::Result<T, RobotError>
+where
+    Read: FnMut() -> std::result::Result<T, RobotError>,
+{
+    let start = Instant::now();
+
+    loop {
+        match read() {
+            Ok(value) => return Ok(value),
+            Err(
+                RobotError::MonitorStateIncomplete { .. } | RobotError::MonitorStateStale { .. },
+            ) => {},
+            Err(other) => return Err(other),
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(RobotError::Timeout {
+                timeout_ms: timeout.as_millis() as u64,
+            });
+        }
+
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let sleep_duration = poll_interval.min(remaining);
+        if sleep_duration.is_zero() {
+            return Err(RobotError::Timeout {
+                timeout_ms: timeout.as_millis() as u64,
+            });
+        }
+
+        std::thread::sleep(sleep_duration);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use piper_sdk::client::types::{MonitorStateSource, RobotError};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn wait_for_monitor_snapshot_retries_warmup_errors_until_ready() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let read = {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let current = attempts.fetch_add(1, Ordering::SeqCst);
+                if current < 2 {
+                    Err(RobotError::monitor_state_incomplete(
+                        MonitorStateSource::JointPosition,
+                        0b001,
+                        0b111,
+                    ))
+                } else {
+                    Ok(7_u8)
+                }
+            }
+        };
+
+        let value =
+            wait_for_monitor_snapshot(Duration::from_millis(50), Duration::from_millis(1), read)
+                .expect("helper should retry monitor warmup errors");
+
+        assert_eq!(value, 7);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn wait_for_monitor_snapshot_returns_non_warmup_error_without_retrying() {
+        let started_at = Instant::now();
+        let error =
+            wait_for_monitor_snapshot(Duration::from_millis(50), Duration::from_millis(10), || {
+                Err::<u8, _>(RobotError::ConfigError("boom".to_string()))
+            })
+            .expect_err("unexpected errors must not be retried");
+
+        assert!(started_at.elapsed() < Duration::from_millis(10));
+        assert!(matches!(error, RobotError::ConfigError(_)));
+    }
+
+    #[test]
+    fn wait_for_monitor_snapshot_does_not_oversleep_timeout_budget() {
+        let started_at = Instant::now();
+        let error = wait_for_monitor_snapshot(
+            Duration::from_millis(20),
+            Duration::from_millis(100),
+            || {
+                Err::<u8, _>(RobotError::monitor_state_stale(
+                    MonitorStateSource::JointPosition,
+                    Duration::from_millis(30),
+                    Duration::from_millis(15),
+                ))
+            },
+        )
+        .expect_err("persistent warmup errors should time out");
+
+        let elapsed = started_at.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "snapshot wait overslept too far past its 20ms budget: {elapsed:?}",
+        );
+        assert!(matches!(error, RobotError::Timeout { timeout_ms: 20 }));
+    }
+}
