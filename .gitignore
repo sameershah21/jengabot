@@ -1,0 +1,11 @@
+.DS_Store
+node_modules/
+*.tmp
+
+# Third-party SDK clones (not our code)
+piper_sdk/
+piper_sdk_ui/
+piper-sdk-rs/
+
+# Original distribution zip
+JengaBot-repo.zip
