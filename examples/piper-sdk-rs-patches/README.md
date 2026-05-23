@@ -11,6 +11,7 @@ SDK clone itself is gitignored; this folder is the durable copy.
 | `exit_teach_mode.rs` | Raw GS-USB sender. Writes a CAN 0x150 frame with `teach_command=EndRecord (0x02)` to take the arm out of drag-teach mode. Needed because teach mode is non-volatile (survives power cycle) and `enable_position_mode` silently times out while the arm is in teach. |
 | `position_control_demo.rs` | Patched upstream example: extended startup timeouts (5 s firmware / 10 s feedback / 15 s disable & enable), added a Maintenance → Standby transition, switched serial→`gs_usb_auto`, and **streams position commands at 50 Hz instead of single-shot** (the single-shot version reported "complete" but the arm never moved). |
 | `joint_sweep.rs` | New example. Exercises each of J1–J6 individually through ±20° while holding the other joints at the home pose. 50 Hz streaming, ~3 s per segment. |
+| `gripper_test.rs` | New example. Streams `set_gripper` at 50 Hz through OPEN → CLOSE → HALF → CLOSE-HARD → OPEN. Observed: command `1.0` saturates at gripper position ≈ 0.696, command `0.5` lands at 0.498 — so the upper end of the SDK's `[0,1]` doesn't quite reach mechanical full-open. |
 
 ## Apply / build
 
