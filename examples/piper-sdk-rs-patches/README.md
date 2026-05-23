@@ -14,6 +14,15 @@ SDK clone itself is gitignored; this folder is the durable copy.
 | `gripper_test.rs` | New example. Streams `set_gripper` at 50 Hz through OPEN → CLOSE → HALF → CLOSE-HARD → OPEN. Observed: command `1.0` saturates at gripper position ≈ 0.696, command `0.5` lands at 0.498 — so the upper end of the SDK's `[0,1]` doesn't quite reach mechanical full-open. |
 | `record_pose.rs` | Connect → Standby (motors off) → drag the arm by hand → type pose name + Enter to append current joint angles to `poses.txt`. `q` + Enter to quit. |
 | `play_poses.rs` | Reads `poses.txt` and streams each pose at 50 Hz for `--segment-secs` (default 4 s). `--sequence name_a,name_b,...` to play a subset in order. |
+| `frame_scan.rs` | Read-only raw CAN frame dump (200+ frames). Prints unique CAN IDs with hit counts + sample data. Use to diagnose firmware protocol shifts. |
+| `feedback_check.rs` | Read-only joint position observer for N seconds. Never enables/disables motors, so dropping the handle won't trigger auto-disable. Use to verify protocol-ID patches before any motion test. |
+
+## Firmware patches
+
+| File | What it does |
+|---|---|
+| `firmware-1.8-3-id-shift.patch` | **PiPER-X firmware S-V1.8-3 fix.** Shifts cold-feedback CAN IDs by +0xFF: `0x2A1`→`0x3A0` (ROBOT_STATUS), `0x2A2-4`→`0x3A1-3` (END_POSE), `0x2A5-7`→`0x3A4-6` (JOINT_FEEDBACK), `0x2A8`→`0x3A7` (GRIPPER). Hot data (`0x251-6`) and low-speed (`0x261-6`) unchanged. Apply with `git apply` inside the piper-sdk-rs checkout. Diagnosed via `frame_scan` reading raw 1.8-3 frames; verified via `feedback_check`. |
+| `firmware-1.8-3-yolo.patch` | **DANGEROUS — only use as fallback.** Bypasses the SDK's mode-confirmation / enabled / disabled / freshness checks. Was used as a stop-gap before the real ID fix was found. Caused an arm-drop incident because joint-position reads still failed after motors were enabled. Prefer `firmware-1.8-3-id-shift.patch`. |
 
 ## Apply / build
 

@@ -1,0 +1,31 @@
+diff --git a/crates/piper-protocol/src/frame/protocol_ids.rs b/crates/piper-protocol/src/frame/protocol_ids.rs
+index d804961..bee7f87 100644
+--- a/crates/piper-protocol/src/frame/protocol_ids.rs
++++ b/crates/piper-protocol/src/frame/protocol_ids.rs
+@@ -13,14 +13,18 @@ pub const CONTROL_END_ID: StandardCanId = ID_MIT_CONTROL_6;
+ pub const CONFIG_BASE_ID: StandardCanId = ID_MASTER_SLAVE_MODE;
+ pub const CONFIG_END_ID: StandardCanId = ID_GRIPPER_TEACH_PARAMS_FEEDBACK;
+ 
+-pub const ID_ROBOT_STATUS: StandardCanId = standard(0x2A1);
+-pub const ID_END_POSE_1: StandardCanId = standard(0x2A2);
+-pub const ID_END_POSE_2: StandardCanId = standard(0x2A3);
+-pub const ID_END_POSE_3: StandardCanId = standard(0x2A4);
+-pub const ID_JOINT_FEEDBACK_12: StandardCanId = standard(0x2A5);
+-pub const ID_JOINT_FEEDBACK_34: StandardCanId = standard(0x2A6);
+-pub const ID_JOINT_FEEDBACK_56: StandardCanId = standard(0x2A7);
+-pub const ID_GRIPPER_FEEDBACK: StandardCanId = standard(0x2A8);
++// JengaBot: PiPER-X firmware S-V1.8-3 shifts the cold feedback range by
++// +0xFF. Hot data (0x251-6) and low-speed (0x261-6) stayed put.
++// Mapping verified by `frame_scan` example reading 500 raw frames at the
++// arm's idle pose.
++pub const ID_ROBOT_STATUS: StandardCanId = standard(0x3A0); // was 0x2A1
++pub const ID_END_POSE_1: StandardCanId = standard(0x3A1); // was 0x2A2
++pub const ID_END_POSE_2: StandardCanId = standard(0x3A2); // was 0x2A3
++pub const ID_END_POSE_3: StandardCanId = standard(0x3A3); // was 0x2A4
++pub const ID_JOINT_FEEDBACK_12: StandardCanId = standard(0x3A4); // was 0x2A5
++pub const ID_JOINT_FEEDBACK_34: StandardCanId = standard(0x3A5); // was 0x2A6
++pub const ID_JOINT_FEEDBACK_56: StandardCanId = standard(0x3A6); // was 0x2A7
++pub const ID_GRIPPER_FEEDBACK: StandardCanId = standard(0x3A7); // was 0x2A8
+ 
+ pub const ID_JOINT_DRIVER_HIGH_SPEED_1: StandardCanId = standard(0x251);
+ pub const ID_JOINT_DRIVER_HIGH_SPEED_2: StandardCanId = standard(0x252);

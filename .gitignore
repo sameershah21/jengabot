@@ -6,6 +6,12 @@ node_modules/
 piper_sdk/
 piper_sdk_ui/
 piper-sdk-rs/
+pyAgxArm/
+power-vision/
+
+# AgileX Windows tooling
+ArmRobotUA_*.zip
+armrobot/
 
 # Original distribution zip
 JengaBot-repo.zip
