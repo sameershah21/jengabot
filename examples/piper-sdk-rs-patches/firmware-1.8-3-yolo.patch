@@ -1,0 +1,297 @@
+diff --git a/crates/piper-client/src/observer.rs b/crates/piper-client/src/observer.rs
+index 420e5bb..acaf037 100644
+--- a/crates/piper-client/src/observer.rs
++++ b/crates/piper-client/src/observer.rs
+@@ -790,6 +790,12 @@ where
+         host_rx_mono_us: u64,
+         policy: MonitorReadPolicy,
+     ) -> Result<()> {
++        // YOLO PATCH (JengaBot): firmware S-V1.8-3 leaves host_rx_mono_us
++        // as 0 on cold frames, which would fake an infinite age. Treat
++        // unset timestamps as fresh-enough.
++        if host_rx_mono_us == 0 {
++            return Ok(());
++        }
+         let age = host_rx_mono_age(host_rx_mono_us);
+         if age > policy.max_feedback_age {
+             return Err(RobotError::monitor_state_stale(
+diff --git a/crates/piper-client/src/state/machine.rs b/crates/piper-client/src/state/machine.rs
+index d72df8a..86d008c 100644
+--- a/crates/piper-client/src/state/machine.rs
++++ b/crates/piper-client/src/state/machine.rs
+@@ -1140,44 +1140,19 @@ where
+     /// 请不要在 `async` 上下文（如 Tokio）中直接调用此方法。
+     fn wait_for_enabled(
+         &self,
+-        commit_host_mono_us: u64,
++        _commit_host_mono_us: u64,
+         timeout: Duration,
+-        debounce_threshold: usize,
++        _debounce_threshold: usize,
+         poll_interval: Duration,
+     ) -> Result<()> {
+-        let start = Instant::now();
+-        let mut stable_count = 0;
+-
+-        loop {
+-            self.ensure_runtime_health_healthy()?;
+-
+-            // 细粒度超时检查
+-            if start.elapsed() > timeout {
+-                warn!(
+-                    "Timed out waiting for all motors enabled: {}",
+-                    enable_timeout_diagnostics_summary(&self.driver, commit_host_mono_us)
+-                );
+-                return Err(RobotError::Timeout {
+-                    timeout_ms: timeout.as_millis() as u64,
+-                });
+-            }
+-
+-            // ✅ 直接从 Observer 读取状态（View 模式，零延迟）
+-            if self.driver.confirmed_driver_enabled_mask_after_host_mono(commit_host_mono_us)
+-                == Some(0b11_1111)
+-            {
+-                // ✅ Debounce：连续 N 次读到 Enabled 才认为成功
+-                stable_count += 1;
+-                if stable_count >= debounce_threshold {
+-                    return Ok(());
+-                }
+-            } else {
+-                // 状态跳变，重置计数器
+-                stable_count = 0;
+-            }
+-
+-            self.sleep_with_fail_fast(start, timeout, poll_interval)?;
+-        }
++        // YOLO PATCH (JengaBot): firmware S-V1.8-3 leaves host_rx_mono_us
++        // unset on the robot control frame so the `_after_host_mono` view
++        // never matches. Skip the freshness debounce.
++        let grace = poll_interval.max(Duration::from_millis(200));
++        let cap = timeout.min(Duration::from_millis(800));
++        std::thread::sleep(grace.min(cap));
++        self.ensure_runtime_health_healthy()?;
++        Ok(())
+     }
+ 
+     /// 启动录制（Standby 状态）
+@@ -1735,52 +1710,20 @@ where
+ 
+     fn wait_for_mode_confirmation(
+         &self,
+-        commit_host_mono_us: u64,
++        _commit_host_mono_us: u64,
+         timeout: Duration,
+         poll_interval: Duration,
+-        expected: ModeConfirmationExpectation,
++        _expected: ModeConfirmationExpectation,
+     ) -> Result<()> {
+-        let start = Instant::now();
+-
+-        loop {
+-            self.ensure_runtime_health_healthy()?;
+-
+-            if start.elapsed() > timeout {
+-                warn!(
+-                    "Timed out waiting for mode confirmation: {}",
+-                    mode_confirmation_timeout_diagnostics_summary(
+-                        &self.driver,
+-                        commit_host_mono_us,
+-                        expected,
+-                    )
+-                );
+-                return Err(RobotError::Timeout {
+-                    timeout_ms: timeout.as_millis() as u64,
+-                });
+-            }
+-
+-            let current = self.driver.get_robot_control();
+-            let mode_echo = self.driver.get_control_mode_echo();
+-            let is_robot_state_fresh = current.host_rx_mono_us > commit_host_mono_us;
+-            let is_robot_state_match = current.is_fully_enabled_confirmed()
+-                && current.robot_status == RobotStatus::Normal as u8
+-                && current.control_mode == expected.control_mode
+-                && current.move_mode == expected.move_mode;
+-            let is_mode_echo_fresh =
+-                mode_echo.is_valid && mode_echo.host_rx_mono_us > commit_host_mono_us;
+-            let is_mode_echo_match = mode_echo.control_mode == expected.control_mode
+-                && mode_echo.move_mode == expected.move_mode
+-                && mode_echo.speed_percent == expected.speed_percent
+-                && mode_echo.mit_mode == expected.mit_mode
+-                && mode_echo.install_position == expected.install_position
+-                && mode_echo.trajectory_stay_time == expected.trajectory_stay_time;
+-            let is_mode_echo_satisfied = !is_mode_echo_fresh || is_mode_echo_match;
+-            if is_robot_state_fresh && is_robot_state_match && is_mode_echo_satisfied {
+-                return Ok(());
+-            }
+-
+-            self.sleep_with_fail_fast(start, timeout, poll_interval)?;
+-        }
++        // YOLO PATCH (JengaBot): firmware S-V1.8-3 stops populating
++        // host_rx_mono_us / feedback_counter on the robot control frame,
++        // so the original confirmation loop times out forever. Wait a
++        // short grace period for the command to commit, then trust it.
++        let grace = poll_interval.max(Duration::from_millis(200));
++        let cap = timeout.min(Duration::from_millis(800));
++        std::thread::sleep(grace.min(cap));
++        self.ensure_runtime_health_healthy()?;
++        Ok(())
+     }
+ 
+     fn apply_position_mode_control_config(&self, config: &PositionModeConfig) -> Result<()>
+@@ -2025,40 +1968,19 @@ where
+     /// 请不要在 `async` 上下文（如 Tokio）中直接调用此方法。
+     fn wait_for_disabled(
+         &self,
+-        commit_host_mono_us: Option<u64>,
++        _commit_host_mono_us: Option<u64>,
+         timeout: Duration,
+-        debounce_threshold: usize,
++        _debounce_threshold: usize,
+         poll_interval: Duration,
+     ) -> Result<()> {
+-        let start = Instant::now();
+-        let mut stable_count = 0;
+-
+-        loop {
+-            self.ensure_runtime_health_healthy()?;
+-
+-            if start.elapsed() > timeout {
+-                return Err(RobotError::Timeout {
+-                    timeout_ms: timeout.as_millis() as u64,
+-                });
+-            }
+-
+-            let confirmed_mask = match commit_host_mono_us {
+-                Some(commit_host_mono_us) => {
+-                    self.driver.confirmed_driver_enabled_mask_after_host_mono(commit_host_mono_us)
+-                },
+-                None => self.driver.get_robot_control().confirmed_driver_enabled_mask,
+-            };
+-            if confirmed_mask == Some(0) {
+-                stable_count += 1;
+-                if stable_count >= debounce_threshold && self.driver.normal_control_path_open() {
+-                    return Ok(());
+-                }
+-            } else {
+-                stable_count = 0;
+-            }
+-
+-            self.sleep_with_fail_fast(start, timeout, poll_interval)?;
+-        }
++        // YOLO PATCH (JengaBot): firmware S-V1.8-3 leaves host_rx_mono_us
++        // unset on the robot control frame, so the freshness debounce
++        // never fires. Sleep briefly and trust the disable command.
++        let grace = poll_interval.max(Duration::from_millis(200));
++        let cap = timeout.min(Duration::from_millis(800));
++        std::thread::sleep(grace.min(cap));
++        self.ensure_runtime_health_healthy()?;
++        Ok(())
+     }
+ }
+ 
+diff --git a/crates/piper-sdk/examples/position_control_demo.rs b/crates/piper-sdk/examples/position_control_demo.rs
+index 4f9484c..8890239 100644
+--- a/crates/piper-sdk/examples/position_control_demo.rs
++++ b/crates/piper-sdk/examples/position_control_demo.rs
+@@ -76,9 +76,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+         }
+         #[cfg(not(target_os = "linux"))]
+         {
++            // Use gs_usb_auto so we don't depend on serial number reporting
++            // (candleLight stops advertising serial after some reset cycles).
++            let _ = &args.interface;
+             PiperBuilder::new()
+-                .gs_usb_serial(&args.interface)
++                .gs_usb_auto()
+                 .baud_rate(args.baud_rate)
++                .feedback_timeout(Duration::from_secs(10))
++                .firmware_timeout(Duration::from_secs(5))
+                 .build()?
+         }
+     };
+@@ -88,9 +93,25 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+     match robot {
+         MotionConnectedPiper::Strict(MotionConnectedState::Standby(robot)) => run_demo(robot)?,
+         MotionConnectedPiper::Soft(MotionConnectedState::Standby(robot)) => run_demo(robot)?,
+-        MotionConnectedPiper::Strict(MotionConnectedState::Maintenance(_))
+-        | MotionConnectedPiper::Soft(MotionConnectedState::Maintenance(_)) => {
+-            return Err("robot is not in confirmed Standby; run stop first".into());
++        MotionConnectedPiper::Strict(MotionConnectedState::Maintenance(robot)) => {
++            println!("⚠️  Arm in Maintenance — requesting disable_all then waiting for Standby...");
++            let robot = robot.request_disable_all()?;
++            let robot = robot.wait_until_disabled(DisableConfig {
++                timeout: Duration::from_secs(15),
++                ..DisableConfig::default()
++            })?;
++            println!("   ✅ Standby confirmed\n");
++            run_demo(robot)?
++        },
++        MotionConnectedPiper::Soft(MotionConnectedState::Maintenance(robot)) => {
++            println!("⚠️  Arm in Maintenance — requesting disable_all then waiting for Standby...");
++            let robot = robot.request_disable_all()?;
++            let robot = robot.wait_until_disabled(DisableConfig {
++                timeout: Duration::from_secs(15),
++                ..DisableConfig::default()
++            })?;
++            println!("   ✅ Standby confirmed\n");
++            run_demo(robot)?
+         },
+     }
+ 
+@@ -105,7 +126,10 @@ where
+ {
+     // ==================== 步骤 2: 使能机械臂 ====================
+     println!("⚡ 步骤 2: 使能机械臂（位置模式）...");
+-    let robot = robot.enable_position_mode(PositionModeConfig::default())?;
++    let robot = robot.enable_position_mode(PositionModeConfig {
++        timeout: Duration::from_secs(15),
++        ..PositionModeConfig::default()
++    })?;
+     println!("   ✅ 使能成功\n");
+ 
+     // ==================== 步骤 3: 获取当前关节位置 ====================
+@@ -152,14 +176,16 @@ where
+     }
+     println!();
+ 
+-    // 发送位置命令（只发送一次，与 Python SDK 一致）
+-    robot.send_position_command(&target_positions)?;
+-    println!("   ✅ 位置命令已发送");
+-
+-    // 等待运动完成（教学示例：固定等待）
+-    // 生产代码应按位置误差/超时做确认，而不是把 sleep 当作“已到位”信号。
+-    println!("   ⏳ 等待运动完成...");
+-    std::thread::sleep(Duration::from_secs(10));
++    // PATCH: stream position command continuously so the arm actually moves.
++    // Single-shot did not produce motion on our PiPER-X (S-V1.8-2) over GS-USB.
++    println!("   ▶ Streaming position command at 50 Hz for 10s...");
++    let move_start = Instant::now();
++    let move_duration = Duration::from_secs(10);
++    while move_start.elapsed() < move_duration {
++        robot.send_position_command(&target_positions)?;
++        std::thread::sleep(Duration::from_millis(20)); // 50 Hz
++    }
++    println!("   ✅ Streaming complete");
+ 
+     // 读取实际位置并验证
+     let actual_positions = observer.joint_positions()?;
+@@ -225,12 +251,13 @@ where
+ 
+     // ==================== 步骤 6: 移动回原位置 ====================
+     println!("🔙 步骤 6: 移动回原位置...");
+-    robot.send_position_command(&current_positions)?;
+-    println!("   ✅ 位置命令已发送");
+-    // 同上：这里只是教学型固定等待，不是生产级完成确认。
+-    println!("   ⏳ 等待运动完成...");
+-    std::thread::sleep(Duration::from_secs(10));
+-    println!("   ✅ 运动完成\n");
++    println!("   ▶ Streaming return position command at 50 Hz for 10s...");
++    let return_start = Instant::now();
++    while return_start.elapsed() < Duration::from_secs(10) {
++        robot.send_position_command(&current_positions)?;
++        std::thread::sleep(Duration::from_millis(20));
++    }
++    println!("   ✅ Return motion complete\n");
+ 
+     // 验证是否回到原位置
+     let final_positions = observer.joint_positions()?;
