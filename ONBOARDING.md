@@ -350,81 +350,132 @@ links to AgileX docs.
 
 ---
 
-## 13. Leader/follower (Raymond → Bruce)
+## 13. Leader/follower (Raymond → Bruce) — record + replay
 
-The plan is bilateral teleop: the operator drags **Raymond's arm** by hand
-(drag-teach mode, motors compliant) and **Bruce's arm** mirrors the joint
-angles in real time. Both arms must be on independent CAN buses, each
-with its own candleLight dongle on the same Mac.
+The intended demo is bilateral teleop: operator drags **Raymond** by hand,
+**Bruce** mirrors the joint angles. On Linux the SDK's bundled
+`dual_arm_bilateral_control` does this live over MIT mode with both arms
+on independent CAN buses.
 
-Our path uses two of our own examples piped together:
+**On macOS, *live* simultaneous two-dongle operation does not work
+reliably.** Documented at length in our `macos-no-reset-on-start.patch`
+notes and corroborated by [candleLight_fw issue #38](https://github.com/candle-usb/candleLight_fw/issues/38)
+and [candleLightJS notes](https://github.com/ieb/candleLightJS): macOS
+IOKit's USB stack enters a "kernel halt-state" under sustained
+concurrent reads against multiple gs_usb dongles. The only recovery
+documented in the community is **physical USB unplug + replug**, which
+defeats live teleop. We tried:
 
-- **`leader_stream`** runs against Raymond — emits one JSON line per tick.
-- **`follower_play`** runs against Bruce — reads JSON lines on stdin and
-  sends them as 50 Hz position commands.
+- Same-time pipe (init race) — both SDKs reset() each other's USB
+  descriptor.
+- Staggered init via named pipe + 6 s sleep — fixes init race, ongoing
+  RX still dies with `USB receive failed: Other error`.
+- Patching the SDK to drop the up-front `reset()` call
+  (`macos-no-reset-on-start.patch`) — improves init reliability but
+  does not save the RX thread.
+- Separate USB controllers (verified physically) — doesn't help.
 
-The two binaries communicate over a Unix pipe, which means leader and
-follower can be on the same Mac today or on different machines later
-(just swap `|` for `nc`).
+What we use instead is **record-then-replay**: capture Raymond's motion
+to a file with one dongle plugged, then plug only Bruce and replay the
+file. Same architecture, same JSON wire format, no concurrent dongles.
 
-### Phase A — follower-only smoke test (current, Raymond not connected)
+### Workflow
 
-Bruce alone, no input source. Confirms the follower init path lights up
-cleanly:
-
-```bash
-sudo .../follower_play --hold-seconds 5
+```
+┌──────────────────────────────────┐    ┌──────────────────────────────────┐
+│ Step 1 — RECORD (Raymond only)   │    │ Step 2 — REPLAY (Bruce only)     │
+│                                  │    │                                  │
+│  unplug Bruce                    │    │  unplug Raymond                  │
+│  plug Raymond                    │    │  plug Bruce                      │
+│  Raymond LED solid green         │    │  Bruce LED off                   │
+│  drag arm by hand                │    │                                  │
+│                                  │    │  sudo .../follower_play \        │
+│  sudo .../leader_stream \        │    │     --interface BRUCE_SERIAL \   │
+│     --interface RAYMOND_SERIAL \ │    │     < raymond.jsonl              │
+│     --rate 50 \                  │    │                                  │
+│     --out raymond.jsonl          │    │  Bruce executes the recorded     │
+│                                  │    │  trajectory at 50 Hz with        │
+│  Ctrl+C when done                │    │  --max-step-deg clamp.           │
+└──────────────────────────────────┘    └──────────────────────────────────┘
 ```
 
-What happens: connects, enables position mode, reads Bruce's current
-joint angles, then streams **that same pose** for 5 seconds (so the arm
-doesn't move), then disables cleanly. If this succeeds, the follower
-half is good to go.
+### Step 1 — record Raymond
 
-### Phase B — full leader → follower (Raymond plugged in)
-
-When Raymond physically arrives:
-
-1. **Plug Raymond's candleLight dongle** into the Mac alongside Bruce's.
-   Confirm both:
+1. **Unplug Bruce's dongle** entirely. Raymond is the only candleLight
+   on USB. Confirms: `ioreg -p IOUSB | grep -c "candleLight"` returns 1.
+2. **Single-click the button between Raymond's J5/J6** so the LED is
+   solid green (drag-teach engaged, joints compliant).
+3. Start recording:
    ```bash
-   ioreg -p IOUSB -l -w 0 | grep -A1 "candleLight USB to CAN adapter" \
-     | grep "USB Serial Number" | sort -u
+   sudo /Users/sameershah/learn/github/jengabot/piper-sdk-rs/target/debug/examples/leader_stream \
+       --interface 002500335246570520323934 \
+       --rate 50 \
+       --out raymond.jsonl
    ```
-   Expect two distinct serials. Note which is Bruce, which is Raymond.
-2. **Power Raymond's arm** and confirm it's at zero pose. Single-click
-   the button between Raymond's J5/J6 so its LED is solid green
-   (drag-teach engaged, joints compliant). Now Raymond is back-drivable
-   by hand.
-3. **Check Raymond's firmware** by running `frame_scan` against just
-   Raymond's bus. The example currently uses `gs_usb_auto` (picks the
-   first dongle), so the simplest way is: physically unplug Bruce's
-   dongle, run `frame_scan`, see whether `0x2A*` or `0x3A*` IDs show
-   up, then plug Bruce back. If Raymond is on S-V1.8-3 the ID-shift
-   patch we already applied covers it.
-4. **Pipe leader → follower.** Each process binds to whichever dongle
-   it finds first via `gs_usb_auto`; this works if only the intended
-   arm is reachable to each process. The safest sequence:
-   - Unplug Bruce; plug Raymond. Start `leader_stream`. Verify lines.
-     Pause it (Ctrl+Z).
-   - Plug Bruce back. Foreground `leader_stream` (`fg`) and pipe:
-     ```bash
-     sudo .../leader_stream --rate 50 | sudo .../follower_play
-     ```
-   - If both dongles are plugged simultaneously and you need explicit
-     routing, fall back to the SDK's bundled example (next subsection).
-5. **Watch the first run carefully.** Move Raymond's arm slowly through
-   a small motion (a few degrees on one joint). Bruce should track.
-   `follower_play` clamps per-tick joint step to 2° by default so a
-   jumpy input can't whip the arm. Stop with Ctrl+C the moment anything
-   looks wrong.
+   (Substitute Raymond's serial. We saw `002500335246570520323934`
+   today; verify with `ioreg`.)
+4. **Move Raymond by hand** through the trajectory you want Bruce to
+   reproduce. The terminal will print JSON lines as you move.
+5. **Ctrl+C** when finished. `raymond.jsonl` now holds one JSON record
+   per 20 ms of motion.
+6. **Single-click Raymond's button again** to turn the LED off
+   (drag-teach off — gets Raymond back to CAN mode).
 
-### Alternative — bundled SDK dual-arm example
+### Step 2 — replay onto Bruce
+
+1. **Unplug Raymond's dongle.** Plug Bruce's. Only Bruce on USB.
+2. Confirm Bruce's LED is **off** (CAN-controllable, not drag-teach).
+3. Workspace clear; ready to support Bruce if anything looks wrong.
+4. Stream the recorded trajectory:
+   ```bash
+   sudo /Users/sameershah/learn/github/jengabot/piper-sdk-rs-v1.8-2/target/debug/examples/follower_play \
+       --interface 0028002A4148570C20343133 \
+       --max-step-deg 2 \
+       < raymond.jsonl
+   ```
+   (Substitute Bruce's serial. We saw `0028002A4148570C20343133` today.)
+5. Bruce will:
+   - Connect, transition Maintenance → Standby if needed
+   - Enable position mode
+   - Seed its target at its current pose
+   - Read JSON lines from stdin at the input's natural rate
+   - Stream `send_position_command` at 50 Hz with `max_step_deg`
+     clamping
+   - Disable cleanly when the input file ends (EOF on stdin)
+
+### Tuning replay
+
+- **Slower replay** for safety on first run: pre-process the file to
+  duplicate each line N times or to interleave a `sleep`. Or modify
+  `follower_play` to accept a `--rate` override that decouples its
+  stream rate from the input rate.
+- **Smaller steps:** drop `--max-step-deg` to `1.0` for slower, safer
+  motion at the cost of lag.
+- **Re-record:** if Raymond's trajectory had a glitch, just re-record.
+  JSON files are tiny (~1 KB/sec).
+
+### When two machines become available
+
+The exact same wire format works over a network. Future setup once a
+second machine is available:
+
+```bash
+# Machine A (Raymond), live source
+sudo .../leader_stream --interface RAYMOND_SERIAL --rate 50 | nc -l 9000
+
+# Machine B (Bruce), live consumer
+nc machine-a.local 9000 | sudo .../follower_play --interface BRUCE_SERIAL
+```
+
+Same `follower_play`, same `leader_stream`, same JSON lines — only the
+transport between them changes.
+
+### Alternative — bundled SDK dual-arm example (Linux only in practice)
 
 `piper-sdk-rs` ships `dual_arm_bilateral_control`, which uses MIT mode
-(both arms motorized but back-drivable) and explicit `--left-serial` /
-`--right-serial` flags. More sophisticated than our pipe approach but
-also less debuggable:
+and explicit `--left-serial` / `--right-serial` flags. Works on Linux
+because SocketCAN serializes per-arm CAN drivers properly. On macOS it
+hits the same IOKit halt-state described above.
 
 ```bash
 sudo ./target/debug/examples/dual_arm_bilateral_control \
@@ -432,9 +483,6 @@ sudo ./target/debug/examples/dual_arm_bilateral_control \
     --right-serial <BRUCE_SERIAL>   \
     --mode master-follower
 ```
-
-`master-follower` mode = leader streams to follower. `bilateral` adds
-mutual force feedback (overkill for setup-Jenga).
 
 ### Safety reminders for the follower
 
