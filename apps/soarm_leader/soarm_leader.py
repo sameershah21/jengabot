@@ -64,21 +64,25 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--port', default='/dev/cu.usbserial-110')
     ap.add_argument('--baud', type=int, default=1_000_000)
-    ap.add_argument('--scale', type=float, default=0.5,
-                    help='Multiplier on every delta before emit (0.5 = follower moves half as much)')
-    ap.add_argument('--signs', default='1,1,1,1,1,1',
-                    help='Per-joint sign (+1 or -1) to flip mismatched axes (6 entries for J1..J5 + gripper)')
+    ap.add_argument('--scale', type=float, default=0.6,
+                    help='Multiplier on every joint delta before emit. 0.6 worked well in '
+                         'live SO-101 → Bruce testing — bigger SO-101 motion = visibly bigger '
+                         'Bruce motion without overwhelming the follower step clamp.')
+    ap.add_argument('--signs', default='1,1,-1,1,1,1',
+                    help='Per-joint sign (+1 or -1). 6 entries for J1..J5 + gripper. '
+                         'Default flips J3 because PiPER J3 range is [-175°, 0°] (negative '
+                         'only) — without the flip, half of SO-101 J3 motion lands above 0 '
+                         'and gets silently clamped to zero on Bruce.')
     ap.add_argument('--human', action='store_true',
                     help='Print human-readable angles to stdout instead of JSON')
     ap.add_argument('--max-emit-hz', type=float, default=50.0,
                     help='Cap output rate. If the board emits slower, we emit slower.')
     # Gripper-specific
-    ap.add_argument('--gripper-scale', type=float, default=3.0,
+    ap.add_argument('--gripper-scale', type=float, default=5.0,
                     help='Multiplier on the gripper raw-delta before normalizing to a 0..1 step. '
-                         'Bigger = Bruce moves more per SO-101 squeeze. Default 3.0 lets a '
-                         '~330-raw SO-101 squeeze span Bruce\'s full [0,1] gripper range. '
-                         'In follower_play --incremental mode this becomes an additive delta '
-                         'on Bruce\'s seed gripper position.')
+                         'Bigger = Bruce moves more per SO-101 squeeze. 5.0 came from live '
+                         'testing where 3.0 was too gentle. In follower_play --incremental '
+                         'mode this becomes an additive delta on Bruce\'s seed gripper position.')
     ap.add_argument('--gripper-invert', action='store_true',
                     help='Flip sign of the gripper delta (if Bruce opens when SO-101 closes).')
     ap.add_argument('--gripper-deadband', type=float, default=0.05,
@@ -159,12 +163,25 @@ def main():
                               for v, z, sign in zip(vals, zero, signs)]
                 gripper_delta = 0.0
             else:
-                # First 5 SO-101 servos = J1..J5 → PiPER J1..J5 deltas.
-                # PiPER J6 padded with 0 (no delta → seed pose holds).
+                # Joint remapping (observed live + operator-requested):
+                #
+                # SO-101 servo index  →  Bruce joint index
+                #   0 (J1)            →  0 (J1)
+                #   1 (J2)            →  1 (J2)
+                #   2 (J3)            →  2 (J3)
+                #   3 (J4)            →  4 (J5)
+                #   4 (J5)            →  5 (J6)
+                # Bruce J4 (idx 3) holds at seed — no SO-101 source.
+                def delta(i):
+                    return (vals[i] - zero[i]) * RAW_TO_DEG * args.scale * signs[i]
                 joints_deg = [
-                    (vals[i] - zero[i]) * RAW_TO_DEG * args.scale * signs[i]
-                    for i in range(5)
-                ] + [0.0]
+                    delta(0),   # Bruce J1
+                    delta(1),   # Bruce J2
+                    delta(2),   # Bruce J3
+                    0.0,        # Bruce J4 — hold (no leader source)
+                    delta(3),   # Bruce J5 ← SO-101 J4
+                    delta(4),   # Bruce J6 ← SO-101 J5
+                ]
                 # 6th SO-101 servo = gripper. Emit RAW DELTA from zero,
                 # normalized so a ~1000-raw squeeze ≈ 1.0 with default
                 # scale=3.0. follower_play in --incremental will add this
