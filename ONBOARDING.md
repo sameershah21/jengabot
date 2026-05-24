@@ -14,15 +14,16 @@ We have two PiPER-X arms in this project, with names everyone uses:
 
 | Arm | Role | Notes |
 |---|---|---|
-| **Bruce's arm** | **Leader** (currently the only one connected) | Originally on firmware S-V1.8-2; got updated to S-V1.8-3 mid-project. Has been the workhorse for every example we built — `joint_sweep`, `gripper_test`, `record_pose`, etc. |
-| **Raymond's arm** | **Follower** (joining later) | Firmware unknown until plugged in — run `frame_scan` against it to confirm and decide whether the ID-shift patch applies. |
+| **Raymond's arm** | **Leader** (joining shortly) | The operator drags this one by hand. Firmware unknown until plugged in — run `frame_scan` against it to confirm and decide whether the ID-shift patch applies. |
+| **Bruce's arm** | **Follower** (currently the only one connected) | Originally on firmware S-V1.8-2; got updated to S-V1.8-3 mid-project. Has been the workhorse for every example we built — `joint_sweep`, `gripper_test`, `record_pose`, etc. Now also the follower in bilateral teleop. |
 
 Each arm needs its **own candleLight dongle and its own CAN bus**. Don't try
 to chain them on one bus — the SDK driver claims the gs_usb interface
 exclusively, so two arms = two USB devices.
 
-Most of this doc covers single-arm bring-up (Bruce's arm). The leader/follower
-section near the end covers the two-arm path.
+Most of this doc covers single-arm bring-up (using Bruce's arm). The
+leader/follower section near the end covers the two-arm pipe
+(Raymond → Bruce).
 
 ---
 
@@ -122,13 +123,14 @@ After the `cp`, the following Rust files must exist in
 | `gripper_test.rs` | ours | OPEN→CLOSE→HALF→CLOSE-HARD→OPEN cycle |
 | `record_pose.rs` | ours | Drag the arm by hand → save pose to `poses.txt` |
 | `play_poses.rs` | ours | Stream a recorded `poses.txt` sequence |
-| `leader_stream.rs` | ours | JSON-line joint stream for bilateral teleop (Bruce as leader) |
+| `leader_stream.rs` | ours | JSON-line joint stream from a hand-dragged arm (used on Raymond) |
+| `follower_play.rs` | ours | Reads JSON lines from stdin, streams them as position commands to the connected arm (used on Bruce) |
 
 Sanity check after `cp`:
 
 ```bash
-ls piper-sdk-rs/crates/piper-sdk/examples/ | grep -E '^(gs_usb_direct_test|exit_teach_mode|frame_scan|feedback_check|position_control_demo|joint_sweep|gripper_test|record_pose|play_poses|leader_stream)\.rs$' | sort | uniq -c
-# Should print 10 lines, each with count = 1.
+ls piper-sdk-rs/crates/piper-sdk/examples/ | grep -E '^(gs_usb_direct_test|exit_teach_mode|frame_scan|feedback_check|position_control_demo|joint_sweep|gripper_test|record_pose|play_poses|leader_stream|follower_play)\.rs$' | sort | uniq -c
+# Should print 11 lines, each with count = 1.
 ```
 
 **(b) The firmware patches.** Decide based on what your arm reports.
@@ -151,7 +153,7 @@ is the real fix. The yolo file is preserved only as a paper trail.
 
 ## 5. Build the example binaries
 
-Builds all 10 examples in one cargo invocation. Each `--example` flag matches
+Builds all 11 examples in one cargo invocation. Each `--example` flag matches
 exactly one of the files listed in section 4(a).
 
 ```bash
@@ -166,18 +168,19 @@ cargo build -p piper-sdk \
   --example gripper_test \
   --example record_pose \
   --example play_poses \
-  --example leader_stream
+  --example leader_stream \
+  --example follower_play
 ```
 
 First build takes 2–3 minutes (lots of transitive crates). Re-builds after
 small edits are seconds. Binaries land at
 `piper-sdk-rs/target/debug/examples/<name>`.
 
-After a successful build, verify all 10 binaries exist:
+After a successful build, verify all 11 binaries exist:
 
 ```bash
-ls -1 target/debug/examples/ | grep -E '^(gs_usb_direct_test|exit_teach_mode|frame_scan|feedback_check|position_control_demo|joint_sweep|gripper_test|record_pose|play_poses|leader_stream)$'
-# Should print 10 lines.
+ls -1 target/debug/examples/ | grep -E '^(gs_usb_direct_test|exit_teach_mode|frame_scan|feedback_check|position_control_demo|joint_sweep|gripper_test|record_pose|play_poses|leader_stream|follower_play)$'
+# Should print 11 lines.
 ```
 
 ---
@@ -347,88 +350,105 @@ links to AgileX docs.
 
 ---
 
-## 13. Leader/follower (Bruce → Raymond)
+## 13. Leader/follower (Raymond → Bruce)
 
-The plan is bilateral teleop: the operator drags **Bruce's arm** by hand
-(drag-teach mode, motors compliant) and **Raymond's arm** mirrors the
-joint angles in real time. Both arms must be on independent CAN buses, each
+The plan is bilateral teleop: the operator drags **Raymond's arm** by hand
+(drag-teach mode, motors compliant) and **Bruce's arm** mirrors the joint
+angles in real time. Both arms must be on independent CAN buses, each
 with its own candleLight dongle on the same Mac.
 
-### Phase A — leader only (current)
+Our path uses two of our own examples piped together:
 
-Bruce is connected. Raymond is not. We can already run the leader half: read
-Bruce's joints as he's dragged and emit JSON lines that the follower will
-later consume.
+- **`leader_stream`** runs against Raymond — emits one JSON line per tick.
+- **`follower_play`** runs against Bruce — reads JSON lines on stdin and
+  sends them as 50 Hz position commands.
 
-1. **Single-click** the button between J5 and J6 on Bruce so the LED is
-   **solid green**. Joints go compliant — you can move the arm by hand.
-2. Stream the joint angles:
-   ```bash
-   # to stdout, JSON lines, 50 Hz
-   sudo ./target/debug/examples/leader_stream
+The two binaries communicate over a Unix pipe, which means leader and
+follower can be on the same Mac today or on different machines later
+(just swap `|` for `nc`).
 
-   # higher rate + save to file for replay
-   sudo ./target/debug/examples/leader_stream --rate 100 --out leader.jsonl
+### Phase A — follower-only smoke test (current, Raymond not connected)
 
-   # human-readable (debugging only — not the wire format)
-   sudo ./target/debug/examples/leader_stream --human
-   ```
-3. Ctrl+C to stop. The optional `--out` file is one JSON record per line,
-   easy to grep / `jq` / pipe into anything.
-4. After stopping, single-click the button again to take Bruce out of teach
-   mode (LED off). If you forget, the SDK on next run will see
-   `teach_status=1` and silently time out — run `exit_teach_mode` to
-   recover.
+Bruce alone, no input source. Confirms the follower init path lights up
+cleanly:
 
-### Phase B — adding Raymond
+```bash
+sudo .../follower_play --hold-seconds 5
+```
+
+What happens: connects, enables position mode, reads Bruce's current
+joint angles, then streams **that same pose** for 5 seconds (so the arm
+doesn't move), then disables cleanly. If this succeeds, the follower
+half is good to go.
+
+### Phase B — full leader → follower (Raymond plugged in)
 
 When Raymond physically arrives:
 
 1. **Plug Raymond's candleLight dongle** into the Mac alongside Bruce's.
-   `ioreg -p IOUSB -l -w 0 | grep -B1 -A4 candleLight` should show
-   **two** entries — note both `USB Serial Number` values.
-2. **Power Raymond's arm** and confirm it's at the zero pose.
-3. **Check Raymond's firmware** by running `frame_scan` against just
-   Raymond's bus. (The smoke tools don't currently take a `--serial`,
-   so easiest is to physically unplug Bruce's dongle, run frame_scan,
-   then plug Bruce back in.) Apply the ID-shift patch if Raymond is on
-   S-V1.8-3 (probably yes — that's what shipped from AgileX recently).
-4. **Use the SDK's bundled `dual_arm_bilateral_control` example**, which
-   takes both serials and handles the per-arm SDK plumbing:
+   Confirm both:
    ```bash
-   sudo ./target/debug/examples/dual_arm_bilateral_control \
-       --left-serial  <BRUCE_SERIAL>  \
-       --right-serial <RAYMOND_SERIAL> \
-       --mode master-follower
+   ioreg -p IOUSB -l -w 0 | grep -A1 "candleLight USB to CAN adapter" \
+     | grep "USB Serial Number" | sort -u
    ```
-   `master-follower` mode = leader's joints stream to follower as
-   targets. `bilateral` mode = both arms also push back on each other
-   via MIT impedance (more sophisticated, not needed for setup-Jenga).
-5. **Safety on Raymond.** Motors auto-disable on `Active` drop, which
-   means Raymond *falls* if `dual_arm_bilateral_control` errors mid-run.
-   Support it physically for the first session; use short test runs
-   (Ctrl+C in 5 seconds) to confirm clean disable before letting it run
-   unattended.
+   Expect two distinct serials. Note which is Bruce, which is Raymond.
+2. **Power Raymond's arm** and confirm it's at zero pose. Single-click
+   the button between Raymond's J5/J6 so its LED is solid green
+   (drag-teach engaged, joints compliant). Now Raymond is back-drivable
+   by hand.
+3. **Check Raymond's firmware** by running `frame_scan` against just
+   Raymond's bus. The example currently uses `gs_usb_auto` (picks the
+   first dongle), so the simplest way is: physically unplug Bruce's
+   dongle, run `frame_scan`, see whether `0x2A*` or `0x3A*` IDs show
+   up, then plug Bruce back. If Raymond is on S-V1.8-3 the ID-shift
+   patch we already applied covers it.
+4. **Pipe leader → follower.** Each process binds to whichever dongle
+   it finds first via `gs_usb_auto`; this works if only the intended
+   arm is reachable to each process. The safest sequence:
+   - Unplug Bruce; plug Raymond. Start `leader_stream`. Verify lines.
+     Pause it (Ctrl+Z).
+   - Plug Bruce back. Foreground `leader_stream` (`fg`) and pipe:
+     ```bash
+     sudo .../leader_stream --rate 50 | sudo .../follower_play
+     ```
+   - If both dongles are plugged simultaneously and you need explicit
+     routing, fall back to the SDK's bundled example (next subsection).
+5. **Watch the first run carefully.** Move Raymond's arm slowly through
+   a small motion (a few degrees on one joint). Bruce should track.
+   `follower_play` clamps per-tick joint step to 2° by default so a
+   jumpy input can't whip the arm. Stop with Ctrl+C the moment anything
+   looks wrong.
 
-### Architectural alternative — pipe `leader_stream` to a custom follower
+### Alternative — bundled SDK dual-arm example
 
-Instead of (or alongside) the SDK's bundled example, you can compose a
-follower out of `leader_stream` + a streamer-to-`send_position_command`
-shim. That gives you a clean network boundary if leader and follower live
-on different machines later (e.g. Bruce on Mac, Raymond on the Linux box
-that hosts the π₀.₅ inference server):
+`piper-sdk-rs` ships `dual_arm_bilateral_control`, which uses MIT mode
+(both arms motorized but back-drivable) and explicit `--left-serial` /
+`--right-serial` flags. More sophisticated than our pipe approach but
+also less debuggable:
 
 ```bash
-# on machine A: leader
-sudo .../leader_stream --rate 100 | nc remote-host 9000
-
-# on machine B: follower (TBD — small Rust loop that reads stdin
-# JSON lines and calls send_position_command against Raymond)
+sudo ./target/debug/examples/dual_arm_bilateral_control \
+    --left-serial  <RAYMOND_SERIAL> \
+    --right-serial <BRUCE_SERIAL>   \
+    --mode master-follower
 ```
 
-This is the same architecture power-vision uses for its Tauri ↔ Rust
-bridge — JSON lines over a transport, with the SDK held inside the
-follower process for the whole session.
+`master-follower` mode = leader streams to follower. `bilateral` adds
+mutual force feedback (overkill for setup-Jenga).
+
+### Safety reminders for the follower
+
+- Bruce's motors **auto-disable on `Active` drop** if the follower
+  process errors out — the arm falls. Support it physically for the
+  first session; use short runs (Ctrl+C within 5 s) to confirm clean
+  disable.
+- `follower_play` holds last pose on stdin silence (default 500 ms
+  watchdog) rather than going limp. If you want a hard stop on EOF,
+  shorten `--watchdog-ms` and trap the resulting "input gone" by
+  Ctrl+C'ing the follower yourself.
+- Per-joint clamp uses the PiPER-X joint limits from the manual
+  (J1 ±154°, J2 0–195°, etc.) — out-of-range targets are silently
+  clipped, not commanded.
 
 ---
 
