@@ -96,6 +96,9 @@ struct Args {
 #[derive(Debug, Clone, Copy)]
 struct TargetState {
     joints_deg: [f64; 6],
+    /// Normalized gripper command 0.0 (closed) .. 1.0 (open). None = no
+    /// gripper update from this line (preserve previous command).
+    gripper: Option<f64>,
     last_update: Instant,
     initialized: bool,
 }
@@ -111,8 +114,10 @@ fn clamp_step(prev_deg: f64, target_deg: f64, max_step: f64) -> f64 {
 }
 
 /// Parse a JSON line. Manual parsing (no serde_json dep on the example),
-/// tolerant of whitespace. Expects: {"t_us":N,"joints_deg":[..,..,..,..,..,..]}
-fn parse_line(line: &str) -> Option<[f64; 6]> {
+/// tolerant of whitespace.
+/// Expects: {"t_us":N,"joints_deg":[..,..,..,..,..,..],"gripper":<f>}
+/// Returns (joints, optional gripper).
+fn parse_line(line: &str) -> Option<([f64; 6], Option<f64>)> {
     let start = line.find("\"joints_deg\"")?;
     let after = &line[start..];
     let l = after.find('[')?;
@@ -125,7 +130,21 @@ fn parse_line(line: &str) -> Option<[f64; 6]> {
         }
         out[i] = tok.trim().parse().ok()?;
     }
-    Some(out)
+
+    // Optional gripper field. Cheap manual scan; no serde dep.
+    let gripper = line.find("\"gripper\"").and_then(|gs| {
+        let tail = &line[gs..];
+        let colon = tail.find(':')?;
+        // Pick characters that can form a float, including leading minus / decimal
+        let value_str: String = tail[colon + 1..]
+            .chars()
+            .skip_while(|c| c.is_whitespace())
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e' || *c == 'E' || *c == '+')
+            .collect();
+        value_str.parse::<f64>().ok()
+    });
+
+    Some((out, gripper))
 }
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -232,6 +251,7 @@ where
 
     let shared = Arc::new(Mutex::new(TargetState {
         joints_deg: seed,
+        gripper: None,
         last_update: Instant::now(),
         initialized: initial.is_some(),
     }));
@@ -259,9 +279,12 @@ where
                     if line.is_empty() {
                         continue;
                     }
-                    if let Some(joints) = parse_line(line) {
+                    if let Some((joints, gripper)) = parse_line(line) {
                         let mut s = shared.lock().unwrap();
                         s.joints_deg = joints;
+                        if gripper.is_some() {
+                            s.gripper = gripper;
+                        }
                         s.last_update = Instant::now();
                         s.initialized = true;
                     } else {
@@ -290,12 +313,11 @@ where
             }
         }
 
-        let target = {
+        let (target, gripper_cmd) = {
             let s = shared.lock().unwrap();
-            if !s.initialized || s.last_update.elapsed() > watchdog {
+            let t = if !s.initialized || s.last_update.elapsed() > watchdog {
                 prev_sent
             } else if args.incremental {
-                // Add deltas from leader to our seed pose
                 let mut t = [0.0; 6];
                 for i in 0..6 {
                     t[i] = seed[i] + s.joints_deg[i];
@@ -303,7 +325,8 @@ where
                 t
             } else {
                 s.joints_deg
-            }
+            };
+            (t, s.gripper)
         };
 
         // Apply exponential smoothing to the raw target before clamping.
@@ -334,6 +357,15 @@ where
         ]);
         if let Err(e) = active.send_position_command(&arr) {
             eprintln!("send err: {e}");
+        }
+        if let Some(g) = gripper_cmd {
+            let g_clamped = g.clamp(0.0, 1.0);
+            // 0.5 = moderate effort. PiPER gripper saturates at ~0.696 on
+            // the OPEN end per our gripper_test findings; clamp [0,1] and
+            // trust the SDK to handle the mapping.
+            if let Err(e) = active.set_gripper(g_clamped, 0.5) {
+                eprintln!("gripper err: {e}");
+            }
         }
         prev_sent = next;
         thread::sleep(STREAM_PERIOD);

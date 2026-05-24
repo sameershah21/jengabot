@@ -67,11 +67,18 @@ def main():
     ap.add_argument('--scale', type=float, default=0.5,
                     help='Multiplier on every delta before emit (0.5 = follower moves half as much)')
     ap.add_argument('--signs', default='1,1,1,1,1,1',
-                    help='Per-joint sign (+1 or -1) to flip mismatched axes')
+                    help='Per-joint sign (+1 or -1) to flip mismatched axes (6 entries for J1..J5 + gripper)')
     ap.add_argument('--human', action='store_true',
                     help='Print human-readable angles to stdout instead of JSON')
     ap.add_argument('--max-emit-hz', type=float, default=50.0,
                     help='Cap output rate. If the board emits slower, we emit slower.')
+    # Gripper-specific
+    ap.add_argument('--gripper-closed', type=int, default=1500,
+                    help='SO-101 gripper raw value when fully closed (probably 1500-2000). Tune by inspecting --human output.')
+    ap.add_argument('--gripper-open', type=int, default=2800,
+                    help='SO-101 gripper raw value when fully open (probably 2500-3000)')
+    ap.add_argument('--no-gripper', action='store_true',
+                    help='Omit the gripper field from JSON output (treat all 6 as joints, original behavior).')
     args = ap.parse_args()
 
     signs = parse_signs(args.signs)
@@ -105,17 +112,21 @@ def main():
     sys.stderr.write('streaming. Ctrl+C to stop.\n\n')
 
     last_emit = 0.0
+    # joints_deg has 6 entries (J1..J5 + a zero-padded J6 so PiPER J6 stays at seed).
     last_good_deg = [0.0] * 6
+    last_good_gripper = 0.5  # half-open default
+
+    grip_span = max(1, args.gripper_open - args.gripper_closed)
 
     try:
         while True:
             line = ser.readline()
             if not line:
-                # No new sample. Keep emitting last good at the cap rate so the
+                # No new sample. Keep emitting last good at the cap rate so
                 # follower doesn't hit its stdin watchdog.
                 now = time.monotonic()
                 if now - last_emit >= period:
-                    emit(args.human, last_good_deg)
+                    emit(args.human, last_good_deg, last_good_gripper, args.no_gripper)
                     last_emit = now
                 continue
 
@@ -123,26 +134,45 @@ def main():
             if vals is None:
                 continue
 
-            joints_deg = [(v - z) * RAW_TO_DEG * args.scale * sign
-                          for v, z, sign in zip(vals, zero, signs)]
+            if args.no_gripper:
+                # 6 joint deltas, no gripper (legacy behavior)
+                joints_deg = [(v - z) * RAW_TO_DEG * args.scale * sign
+                              for v, z, sign in zip(vals, zero, signs)]
+                gripper_norm = 0.5
+            else:
+                # First 5 SO-101 servos = J1..J5 → PiPER J1..J5 deltas.
+                # PiPER J6 padded with 0 (no delta → seed pose holds).
+                joints_deg = [
+                    (vals[i] - zero[i]) * RAW_TO_DEG * args.scale * signs[i]
+                    for i in range(5)
+                ] + [0.0]
+                # 6th SO-101 servo = gripper. Map raw → normalized [0..1].
+                gripper_norm = (vals[5] - args.gripper_closed) / grip_span
+                gripper_norm = max(0.0, min(1.0, gripper_norm))
+
             last_good_deg = joints_deg
+            last_good_gripper = gripper_norm
 
             now = time.monotonic()
             if now - last_emit >= period:
-                emit(args.human, joints_deg)
+                emit(args.human, joints_deg, gripper_norm, args.no_gripper)
                 last_emit = now
     except KeyboardInterrupt:
         sys.stderr.write('\nstopped.\n')
 
 
-def emit(human, joints_deg):
+def emit(human, joints_deg, gripper, no_gripper):
     t_us = int(time.time() * 1_000_000)
     if human:
-        sys.stdout.write(f"[{t_us}] " +
-                         ' '.join(f'J{i+1}={d:+7.2f}°' for i, d in enumerate(joints_deg))
-                         + '\n')
+        line = f"[{t_us}] " + ' '.join(f'J{i+1}={d:+7.2f}°' for i, d in enumerate(joints_deg))
+        if not no_gripper:
+            line += f"   grip={gripper:.2f}"
+        sys.stdout.write(line + '\n')
     else:
-        sys.stdout.write(json.dumps({'t_us': t_us, 'joints_deg': joints_deg}) + '\n')
+        obj = {'t_us': t_us, 'joints_deg': joints_deg}
+        if not no_gripper:
+            obj['gripper'] = gripper
+        sys.stdout.write(json.dumps(obj) + '\n')
     sys.stdout.flush()
 
 
