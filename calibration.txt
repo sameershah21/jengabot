@@ -9,7 +9,7 @@ SO101_DEG   = [181.32, 94.39, 106.26, 184.92, 87.45, 152.40]
 
 # Bruce follower (PiPER-X, serial 0028002A4148570C20343133)
 #   joint angles in degrees
-BRUCE_DEG   = [1.42, -2.13, 1.40, 3.15, 0.44, -4.15]
+BRUCE_DEG   = [0.0, 0, 1.40, 0.0, 0.44, 0.0]
 #                J1    J2     J3    J4    J5    J6
 
 # Notes:
