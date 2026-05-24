@@ -1,26 +1,28 @@
 # JengaBot - Research notes
 
-A deep dive into what was actually built during the hackathon, what was
-verified versus claimed, and where the contributions sit relative to the
-upstream LeRobot / AgileX / Orbbec ecosystems. Written as a complement to
-`PITCH.md` (which is the short sell) and `ONBOARDING.md` (which is the full
-operator guide).
+Companion to `PITCH.md` (short sell) and `ONBOARDING.md` (operator
+guide). This document covers what was actually built, what was
+independently verified versus operator-attested, and where the
+contributions sit relative to the upstream LeRobot / AgileX / Orbbec
+ecosystems.
 
 ## 1. Executive summary
 
-JengaBot is a cross-vendor bilateral teleoperation rig and the imitation-
-learning data pipeline behind it, all running on macOS. A human drags a
-HuggingFace LeRobot SO-101 leader arm; an AgileX PiPER-X 6-DoF arm
-("Bruce") mirrors it; an Orbbec DaBai DC1 wrist camera and a 1080p
-overhead USB webcam record synchronised RGB; every joint command and
-gripper position is logged as JSONL. The hard, reusable part is the
-macOS-native Rust SDK for the PiPER over USB-CAN, including a
-firmware-S-V1.8-3 CAN-ID-shift patch, an IOKit concurrent-init patch, a
-type-state motor-disable workaround, and a gripper seed assertion - all
-attested by the operator to work across five different PiPER-X arms. On
-top of that we shipped two trained baseline policies (a 18 k-param state-
-only BC MLP and a 356 k-param vision+state BC) plus an in-flight SmolVLA
-fine-tune attempt against a freshly converted LeRobot v3.0 dataset.
+JengaBot is a cross-vendor bilateral teleoperation rig and the
+imitation-learning data pipeline behind it, all running on macOS. A
+human drags a HuggingFace LeRobot SO-101 leader; an AgileX PiPER-X
+6-DoF arm ("Bruce") mirrors it; an Orbbec DaBai DC1 wrist camera and
+an overhead 1080p USB webcam record synchronised RGB; every joint
+command and gripper position is logged as JSONL. The hard, reusable
+part is a macOS-native Rust SDK for the PiPER over USB-CAN: a
+firmware-S-V1.8-3 CAN-ID-shift patch, an IOKit concurrent-init patch,
+a type-state motor-disable workaround, and a gripper seed assertion -
+attested by the operator to work across five different PiPER-X arms.
+On top of that we shipped two BC baselines (18k-param state-only MLP
+and 356k-param vision+state) plus a real SmolVLA fine-tune
+(450M params, 200 steps in 85 s on Apple MPS, loss 0.403 -> 0.120)
+against a freshly converted LeRobot v3.0 dataset, with the
+865 MB checkpoint published via git-lfs and on Hugging Face Hub.
 
 ## 2. Hardware build
 
@@ -28,11 +30,11 @@ fine-tune attempt against a freshly converted LeRobot v3.0 dataset.
 |---|---|---|
 | **AgileX PiPER-X**, "Bruce" | 6-DoF follower, 626 mm reach, 1.5 kg payload, 0.1 mm repeatability, CAN-bus interface | https://global.agilex.ai/products/piper-x and https://global.agilex.ai/products/piper |
 | **LeRobot SO-101 leader arm**, "Raymond's stand-in" | 5 joints + parallel gripper using Feetech STS3215 servos (mixed 1/147, 1/191, 1/345 gearing on the leader so it back-drives easily); CH340 USB-serial driver board | https://huggingface.co/docs/lerobot/en/so101 and https://github.com/TheRobotStudio/SO-ARM100 |
-| **Orbbec DaBai DC1** (wrist) | Stereo IR depth + RGB; in-repo we use the depth IR stream at 640x400 Y11 @ 30 fps (RGB is left closed because the macOS UVC kernel driver claims the colour interface); USB PID `0x0657`, serial `CC1N16201DS` | https://www.orbbec.com/documentation/depth-camera/ and https://github.com/orbbec/pyorbbecsdk |
-| **iCspring 1080p USB webcam** (top-down) | Overhead view of the poster, recorded as 1920x1080 mp4 via AVFoundation | generic UVC class |
-| **candleLight USB-to-CAN dongle x 2** | Cross-platform USB CAN adapter; runs `candleLight_fw` (gs_usb USB class). VID `0x1D50` / PID `0x606F`. This is *the* dongle that works on macOS without reflashing, because gs_usb is a userspace protocol over libusb rather than a kernel driver | https://github.com/candle-usb/candleLight_fw and https://python-can.readthedocs.io/en/stable/interfaces/gs_usb.html |
+| **Orbbec DaBai DC1** (wrist) | Stereo IR depth + RGB; we use depth IR at 640x400 Y11 @ 30 fps (RGB left closed - macOS UVC driver claims the colour interface); USB PID `0x0657` | https://www.orbbec.com/documentation/depth-camera/ , https://github.com/orbbec/pyorbbecsdk |
+| **iCspring 1080p USB webcam** | Overhead view, 1920x1080 mp4 via AVFoundation | generic UVC |
+| **candleLight USB-to-CAN dongle x 2** | Cross-platform USB CAN adapter running `candleLight_fw` (gs_usb USB class, VID `0x1D50` / PID `0x606F`). The only dongle that works on macOS without reflashing, because gs_usb is a userspace protocol over libusb | https://github.com/candle-usb/candleLight_fw , https://python-can.readthedocs.io/en/stable/interfaces/gs_usb.html |
 | **24 V / >= 10 A PSU** per PiPER | Power | AgileX manual |
-| **Printed Jenga poster** | Workspace mat: a flat printed sheet with every individual Jenga slot outlined and colour-coded red or blue, so the operator and any policy share an unambiguous, addressable target grid (no per-frame instance segmentation needed) | local artefact |
+| **Printed Jenga poster** | Workspace mat with every Jenga slot outlined and colour-coded red/blue, giving operator and policy a shared addressable target grid | local artefact |
 
 Two PiPER-X arms means **two independent candleLight dongles on two
 independent CAN buses** - the SDK claims gs_usb exclusively per device,
@@ -43,13 +45,12 @@ so chaining is not an option.
 ### Why this was needed
 
 AgileX ships `agilexrobotics/piper_sdk` (Python) which assumes Linux
-SocketCAN: `sudo modprobe gs_usb && sudo ip link set can0 up`. macOS has
-no SocketCAN. The community Rust port `vivym/piper-sdk-rs` is the only
-SDK that explicitly targets Linux + Windows + macOS, by going through
-the gs_usb USB protocol via `rusb`/libusb instead of kernel CAN
-(https://github.com/vivym/piper-sdk-rs). Upstream describes itself as
-"under active development" and "NOT been fully tested on real robotic
-arms" - which is exactly the gap we filled.
+SocketCAN. macOS has no SocketCAN. The community Rust port
+`vivym/piper-sdk-rs` is the only SDK explicitly targeting
+Linux+Windows+macOS, going through gs_usb USB-class via `rusb`/libusb
+instead of kernel CAN (https://github.com/vivym/piper-sdk-rs). Upstream
+flags itself as "under active development" and "NOT been fully tested
+on real robotic arms" - that is exactly the gap we filled.
 
 ### Patches we wrote and ship in `examples/piper-sdk-rs-patches/`
 
@@ -161,23 +162,18 @@ frame of BC/VLA training.
 
 Raw artefacts on disk:
 
-- `episodes/*.jsonl` (6 episodes) + `episodes/*_dabai.mp4` (6 wrist) +
-  `episodes/*_top.mp4` (3 overhead - top cam was added partway through
-  the session). Wrist mp4s range from ~13 MB to ~165 MB; total 1,417
-  joint frames across the 6 episodes.
+- `episodes/` - 6 jsonl episodes + 6 wrist mp4s + 3 overhead mp4s (top
+  cam added partway through the session). Wrist mp4s 13-165 MB; total
+  1,417 joint frames across the 6 episodes.
 - `dataset/` - hand-rolled **LeRobot v2** parquet via
-  `apps/dataset_builder/build_lerobot.py` (241 lines): writes
-  `data/`, `videos/`, `meta/info.json`, `meta/episodes.jsonl`,
-  `meta/tasks.jsonl`.
+  `apps/dataset_builder/build_lerobot.py`.
 - `dataset_v3/` - **LeRobot v3.0** rebuild via
-  `apps/smolvla_trainer/build_v3_dataset.py`, using the installed
-  `LeRobotDataset.create() / add_frame() / save_episode()` API rather
-  than hand-writing parquet. `meta/info.json` confirms
-  `codebase_version=v3.0`, robot_type `piper_x_so101_teleop`,
-  total_episodes 3, total_frames 566, fps 30, both
+  `apps/smolvla_trainer/build_v3_dataset.py`, using the official
+  `LeRobotDataset.create() / add_frame() / save_episode()` API.
+  `meta/info.json` confirms `codebase_version=v3.0`, robot_type
+  `piper_x_so101_teleop`, 3 episodes / 566 frames, fps 30, both
   `observation.images.top` and `observation.images.dabai` re-encoded
-  to 256x256 AV1. v3.0 packs multiple episodes per parquet shard;
-  see https://huggingface.co/docs/lerobot/main/en/lerobot-dataset-v3 .
+  to 256x256 AV1 (https://huggingface.co/docs/lerobot/main/en/lerobot-dataset-v3).
 
 ### Trained checkpoints (all on Apple MPS)
 
@@ -190,30 +186,38 @@ Raw artefacts on disk:
 All numbers come from the actual `*_meta.json` next to each `.pt` and
 are not estimates.
 
-### SmolVLA fine-tune attempt
+### SmolVLA fine-tune
 
-We installed `lerobot[smolvla]` v3.0, built the v3 dataset above, and
-launched `lerobot-train --policy.path=lerobot/smolvla_base
---policy.device=mps --batch_size=1 --steps=10` against the freshly
-converted dataset. The base checkpoint is HuggingFace
-`lerobot/smolvla_base`, a 450M-param VLA built on the
-`HuggingFaceTB/SmolVLM2-500M-Video-Instruct` VLM backbone
-(https://huggingface.co/docs/lerobot/smolvla and the run-config dump
-in `/tmp/smolvla_train.log`, which shows exactly that
-`vlm_model_name` and `pretrained_path`).
+We installed `lerobot[smolvla]` v3.0, built the v3 dataset, and ran
+`lerobot-train --policy.path=lerobot/smolvla_base --policy.device=mps
+--batch_size=2 --steps=200`. The base is HuggingFace
+`lerobot/smolvla_base`, a 450M-param VLA (100M of which are learnable
+at fine-tune time) on the `HuggingFaceTB/SmolVLM2-500M-Video-Instruct`
+VLM backbone (https://huggingface.co/docs/lerobot/smolvla; the
+`vlm_model_name` and `pretrained_path` are both visible in the
+run-config dump in `/tmp/smolvla_train.log`). The pretrained checkpoint
+expects three camera streams (`camera1/2/3`); we supplied two via
+`--rename_map` (`top->camera1`, `dabai->camera2`); `camera3` is silently
+dropped by lerobot.
 
-**Outcome at the time of writing**: the trainer process is still
-alive (`lerobot-train ... --output_dir
-.../runs/smolvla_real`), but the log stops at
-`Creating policy` / `torch_dtype is deprecated! Use dtype instead!`,
-and `apps/smolvla_trainer/runs/smolvla_real/` does not yet contain any
-checkpoint files. HuggingFace's own docs put a 20k-step SmolVLA
-fine-tune at ~4 hours on a single A100; we are attempting it on
-Apple MPS at batch size 1 with only 3 v3 episodes / 566 frames, which
-is well below the ~50-episode minimum the SmolVLA team recommends. So
-this is honestly characterised as **infra plumbed end-to-end, training
-launched, no real fine-tuned checkpoint produced inside the hackathon
-window**.
+**Outcome**: 200 steps completed in **85 s wall-clock** on Apple MPS.
+Loss trace (every 10 steps, logged in
+`apps/smolvla_trainer/loss_curve.txt`):
+0.403 -> 0.197 -> 0.162 -> 0.130 -> 0.105 -> **0.120** at step 200,
+gradient norm 6.5 -> 1.7. The 865 MB `model.safetensors` is committed
+under `apps/smolvla_trainer/runs/smolvla_real/checkpoints/000200/pretrained_model/`
+via **git-lfs** (`.gitattributes` tracks `*.safetensors`) and mirrored
+to https://huggingface.co/pilarclark/jengabot-smolvla-jenga so it can
+be loaded with
+`SmolVLAPolicy.from_pretrained("pilarclark/jengabot-smolvla-jenga")`.
+
+HuggingFace's own docs put a 20k-step SmolVLA fine-tune at ~4 hours on
+a single A100, and the SmolVLA team recommends a ~50-episode minimum
+for a useful task-specific fine-tune. Our 200-step / 3-episode run is
+**proof of pipeline**, not a deployable autonomous controller; with the
+same trainer + the user's existing Alibaba Cloud GPU budget and more
+episodes captured via `follower_play --observed-log`, the path to a real
+policy is unblocked.
 
 ## 8. What is deliberately not done yet
 
