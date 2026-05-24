@@ -29,6 +29,11 @@ episodes/
 
 # Derived LeRobot dataset (regenerate via apps/dataset_builder/build_lerobot.py)
 dataset/
+dataset_v3/
+
+# SmolVLA fine-tune output (865 MB checkpoint exceeds GitHub limit; reproduce with apps/smolvla_trainer/README.md)
+apps/smolvla_trainer/runs/
 
 # Original distribution zip
 JengaBot-repo.zip
+.claude/

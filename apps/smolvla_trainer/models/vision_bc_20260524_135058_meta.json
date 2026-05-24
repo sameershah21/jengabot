@@ -1,0 +1,19 @@
+{
+  "stamp": "20260524_135058",
+  "model": "VisionBC (CNN+state -> action MLP)",
+  "dataset": "/Users/sameershah/learn/github/jengabot/dataset",
+  "cam_key": "top",
+  "epochs": 120,
+  "batch": 32,
+  "hidden": 256,
+  "img_size": 96,
+  "lr": 0.001,
+  "device": "mps",
+  "params": 356135,
+  "train_frames": 510,
+  "val_frames": 56,
+  "final_train_loss": 0.10814808122083253,
+  "final_val_loss": 0.1255306058696338,
+  "elapsed_sec": 8.56,
+  "checkpoint": "/Users/sameershah/learn/github/jengabot/apps/smolvla_trainer/models/vision_bc_20260524_135058.pt"
+}

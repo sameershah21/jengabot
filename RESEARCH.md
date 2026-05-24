@@ -1,0 +1,267 @@
+# JengaBot - Research notes
+
+A deep dive into what was actually built during the hackathon, what was
+verified versus claimed, and where the contributions sit relative to the
+upstream LeRobot / AgileX / Orbbec ecosystems. Written as a complement to
+`PITCH.md` (which is the short sell) and `ONBOARDING.md` (which is the full
+operator guide).
+
+## 1. Executive summary
+
+JengaBot is a cross-vendor bilateral teleoperation rig and the imitation-
+learning data pipeline behind it, all running on macOS. A human drags a
+HuggingFace LeRobot SO-101 leader arm; an AgileX PiPER-X 6-DoF arm
+("Bruce") mirrors it; an Orbbec DaBai DC1 wrist camera and a 1080p
+overhead USB webcam record synchronised RGB; every joint command and
+gripper position is logged as JSONL. The hard, reusable part is the
+macOS-native Rust SDK for the PiPER over USB-CAN, including a
+firmware-S-V1.8-3 CAN-ID-shift patch, an IOKit concurrent-init patch, a
+type-state motor-disable workaround, and a gripper seed assertion - all
+attested by the operator to work across five different PiPER-X arms. On
+top of that we shipped two trained baseline policies (a 18 k-param state-
+only BC MLP and a 356 k-param vision+state BC) plus an in-flight SmolVLA
+fine-tune attempt against a freshly converted LeRobot v3.0 dataset.
+
+## 2. Hardware build
+
+| Device | Role | Reference |
+|---|---|---|
+| **AgileX PiPER-X**, "Bruce" | 6-DoF follower, 626 mm reach, 1.5 kg payload, 0.1 mm repeatability, CAN-bus interface | https://global.agilex.ai/products/piper-x and https://global.agilex.ai/products/piper |
+| **LeRobot SO-101 leader arm**, "Raymond's stand-in" | 5 joints + parallel gripper using Feetech STS3215 servos (mixed 1/147, 1/191, 1/345 gearing on the leader so it back-drives easily); CH340 USB-serial driver board | https://huggingface.co/docs/lerobot/en/so101 and https://github.com/TheRobotStudio/SO-ARM100 |
+| **Orbbec DaBai DC1** (wrist) | Stereo IR depth + RGB; in-repo we use the depth IR stream at 640x400 Y11 @ 30 fps (RGB is left closed because the macOS UVC kernel driver claims the colour interface); USB PID `0x0657`, serial `CC1N16201DS` | https://www.orbbec.com/documentation/depth-camera/ and https://github.com/orbbec/pyorbbecsdk |
+| **iCspring 1080p USB webcam** (top-down) | Overhead view of the poster, recorded as 1920x1080 mp4 via AVFoundation | generic UVC class |
+| **candleLight USB-to-CAN dongle x 2** | Cross-platform USB CAN adapter; runs `candleLight_fw` (gs_usb USB class). VID `0x1D50` / PID `0x606F`. This is *the* dongle that works on macOS without reflashing, because gs_usb is a userspace protocol over libusb rather than a kernel driver | https://github.com/candle-usb/candleLight_fw and https://python-can.readthedocs.io/en/stable/interfaces/gs_usb.html |
+| **24 V / >= 10 A PSU** per PiPER | Power | AgileX manual |
+| **Printed Jenga poster** | Workspace mat: a flat printed sheet with every individual Jenga slot outlined and colour-coded red or blue, so the operator and any policy share an unambiguous, addressable target grid (no per-frame instance segmentation needed) | local artefact |
+
+Two PiPER-X arms means **two independent candleLight dongles on two
+independent CAN buses** - the SDK claims gs_usb exclusively per device,
+so chaining is not an option.
+
+## 3. The macOS Rust CAN SDK - the central contribution
+
+### Why this was needed
+
+AgileX ships `agilexrobotics/piper_sdk` (Python) which assumes Linux
+SocketCAN: `sudo modprobe gs_usb && sudo ip link set can0 up`. macOS has
+no SocketCAN. The community Rust port `vivym/piper-sdk-rs` is the only
+SDK that explicitly targets Linux + Windows + macOS, by going through
+the gs_usb USB protocol via `rusb`/libusb instead of kernel CAN
+(https://github.com/vivym/piper-sdk-rs). Upstream describes itself as
+"under active development" and "NOT been fully tested on real robotic
+arms" - which is exactly the gap we filled.
+
+### Patches we wrote and ship in `examples/piper-sdk-rs-patches/`
+
+1. **Firmware S-V1.8-3 CAN-ID shift** (`firmware-1.8-3-id-shift.patch`).
+   The PiPER firmware family quietly relocated the "cold" feedback
+   block by +0xFF between 1.8-2 and 1.8-3: `ID_ROBOT_STATUS`,
+   `ID_END_POSE_1..3`, `ID_JOINT_FEEDBACK_12/34/56` and
+   `ID_GRIPPER_FEEDBACK` move from `0x2A1-0x2A8` to `0x3A0-0x3A7`. The
+   hot-path joint driver IDs `0x251-0x256` and low-speed `0x261-0x266`
+   stayed put. Our `frame_scan` example produces the histogram you use
+   to decide whether to apply the patch.
+
+2. **IOKit "kernel halt-state" / no-reset-on-start patch**
+   (`macos-no-reset-on-start.patch`). The upstream `GsUsbDevice::start`
+   issues `handle.reset()` (USB re-enumeration) before claiming the
+   interface. Doing that from two SDK instances simultaneously on the
+   same Mac invalidates both descriptors and both threads die. Documented
+   symptom matches the candleLight community thread
+   https://github.com/candle-usb/candleLight_fw/issues/38 . We drop the
+   up-front reset and rely on the persistent bitrate plus the MODE
+   command, which makes two-arm init succeed. (Live RX from two dongles
+   in parallel is still flaky on macOS - that is the platform-level
+   IOKit issue we route around with record-then-replay, see section 4.)
+
+3. **Type-state `Active`-drop motor-disable fix.** The Rust SDK's
+   type-state pattern auto-disables motors when the `Active` handle is
+   dropped - meaning any panic in the example mid-motion makes the arm
+   *fall*, because PiPER has no separate brakes. Our patched
+   `position_control_demo.rs`, `joint_sweep.rs`, `follower_play.rs` all
+   guard the drop path and transition Maintenance -> Standby cleanly
+   before exit so the arm holds its last pose.
+
+4. **Gripper seed re-assertion in `follower_play.rs`.** After
+   `enable_position_mode`, the firmware default opens the gripper to
+   ~70 % regardless of what was commanded one frame earlier. We assert
+   the seed gripper value at high rate for 250 ms post-enable to
+   override that bias, then continue with incremental deltas.
+
+5. **Examples + binaries**: `frame_scan`, `feedback_check`,
+   `exit_teach_mode` (raw CAN 0x150 EndRecord), `joint_sweep`,
+   `gripper_test`, `record_pose`, `play_poses`, `leader_stream`,
+   `follower_play`. Each is a single-purpose tool, all built from one
+   `cargo build` invocation as listed in `ONBOARDING.md` section 5.
+
+The operator attests this stack has been validated against **five
+different physical PiPER-X arms** during the hackathon. We did not
+independently verify on five arms ourselves; what is in the repo are
+the patches, the build instructions, and the JSON wire format that made
+that validation possible.
+
+## 4. Cross-vendor bilateral teleop
+
+A JSON-lines wire format crosses two unrelated robot vendors.
+
+**Leader** (`apps/soarm_leader/soarm_leader.py`) opens the SO-101 driver
+board at 1 Mbaud (`DTR=True, RTS=False`), parses `[POS] p1..p6` ASCII
+lines (raw STS3215 0..4095, 360/4096 deg per step), captures the first
+valid frame as zero, and per servo: tracks a **wrap offset** across the
+0/4095 boundary (any `diff` past +/-2048 shifts the offset by 4096 so
+deltas stay direction-correct), applies per-joint sign + scale (default
+`--signs -1,1,-1,1,-1,1`), and **remaps** SO-101 J1-J3 -> Bruce J1-J3,
+SO-101 J4 -> Bruce J5, SO-101 J5 -> Bruce J6, with **Bruce J4 held at
+seed** (no SO-101 source - SO-101 is 5-DoF, PiPER is 6-DoF). The 6th
+SO-101 servo is the gripper handle, emitted as a `--gripper-scale`-d raw
+delta with a `--gripper-deadband` so Bruce holds its physical position
+until you actually squeeze. Output is rate-capped at 50 Hz with an
+idle-emit so the follower's stdin watchdog never trips.
+
+**Follower** (`piper-sdk-rs/.../follower_play.rs`) consumes the JSON at
+50 Hz with `--max-step-deg` per-tick clamping (default 2 deg),
+`--smoothing` exponential low-pass for choppy low-rate leaders, joint-
+limit clamping from the AgileX manual (J1 +/-154, J2 0..195, J3 -175..0,
+J4 +/-106, J5 +/-75, J6 +/-100), `--incremental` mode so the SO-101's
+zero pose can differ from Bruce's, and a watchdog that holds the last
+pose on stdin silence. An `--observed-log` flag captures Bruce's actual
+joint feedback to disk during replay - the intended next-pass fix for
+`observation.state` being a leader-command proxy. Live two-dongle teleop
+on one Mac is the platform's IOKit limitation, not the software's; we
+record-and-replay instead (full failure modes in `ONBOARDING.md` s. 13).
+
+## 5. Vision stack
+
+Each episode produces a `{stamp}.jsonl` plus up to two side-by-side
+mp4s: `{stamp}_dabai.mp4` (wrist) and `{stamp}_top.mp4` (overhead). Two
+macOS-specific gotchas we fixed in the recorder: AVFoundation **reorders
+camera indices between runs** (fixed by name-based device lookup so
+"Dabai" and "iCspring" resolve across replug); and the iCspring
+**silently falls back to 360x640 portrait** when `-video_size` is not
+pinned (fixed by passing `-video_size 1920x1080` explicitly).
+
+The wrist camera is the Orbbec DaBai DC1, opened depth-only on macOS to
+avoid `uvc_open ... res:-3 (ACCESS)` from the kernel UVC driver claiming
+the colour interface. Verified specs from `apps/depth_sensor/orbbec_probe.py`:
+depth 640x400 Y11 @ 30 fps, `fx=fy=477.8`, `cx=322.9`, `cy=199.0`,
+`get_depth_scale()` returns mm/unit, serial `CC1N16201DS`, firmware
+`RD1001`. Prior art `jonathanhawkins/jenga-stacker` runs the same
+hardware combo - their `orbbec_camera.py`, `perception3d.py` and
+`calibrate_handeye.py` are the templates to lift for hand-eye work.
+
+## 6. The Jenga poster workspace
+
+We printed a poster with every Jenga slot individually outlined and
+colour-coded red or blue. The point is **address space**: instead of
+asking a vision policy to do per-frame instance segmentation of
+identical wooden blocks, the operator and the policy share a printed,
+addressable target grid. "Pick red slot 3, place blue slot 7" becomes a
+colour-coordinate lookup, and the colour cue is in-distribution at every
+frame of BC/VLA training.
+
+## 7. Data pipeline and models
+
+Raw artefacts on disk:
+
+- `episodes/*.jsonl` (6 episodes) + `episodes/*_dabai.mp4` (6 wrist) +
+  `episodes/*_top.mp4` (3 overhead - top cam was added partway through
+  the session). Wrist mp4s range from ~13 MB to ~165 MB; total 1,417
+  joint frames across the 6 episodes.
+- `dataset/` - hand-rolled **LeRobot v2** parquet via
+  `apps/dataset_builder/build_lerobot.py` (241 lines): writes
+  `data/`, `videos/`, `meta/info.json`, `meta/episodes.jsonl`,
+  `meta/tasks.jsonl`.
+- `dataset_v3/` - **LeRobot v3.0** rebuild via
+  `apps/smolvla_trainer/build_v3_dataset.py`, using the installed
+  `LeRobotDataset.create() / add_frame() / save_episode()` API rather
+  than hand-writing parquet. `meta/info.json` confirms
+  `codebase_version=v3.0`, robot_type `piper_x_so101_teleop`,
+  total_episodes 3, total_frames 566, fps 30, both
+  `observation.images.top` and `observation.images.dabai` re-encoded
+  to 256x256 AV1. v3.0 packs multiple episodes per parquet shard;
+  see https://huggingface.co/docs/lerobot/main/en/lerobot-dataset-v3 .
+
+### Trained checkpoints (all on Apple MPS)
+
+| Model | File | Params | Train frames | Val MSE | Wall time |
+|---|---|---|---|---|---|
+| **State-only BC MLP** (state -> action) | `apps/bc_trainer/models/bc_20260524_132821.pt` | 18,439 | 1,276 (val 141) | 0.0776 | 13.41 s, 300 epochs, batch 64, hidden 128, lr 1e-3 |
+| **Vision-conditioned BC** (CNN+state -> action) - early 30-epoch run | `apps/smolvla_trainer/models/vision_bc_20260524_134934.pt` | 356,135 | 510 (val 56) | 4.14 | 4.66 s |
+| **Vision-conditioned BC** - 120-epoch run, hidden 256, img 96 | `apps/smolvla_trainer/models/vision_bc_20260524_135058.pt` | 356,135 | 510 (val 56) | 0.126 | 8.56 s |
+
+All numbers come from the actual `*_meta.json` next to each `.pt` and
+are not estimates.
+
+### SmolVLA fine-tune attempt
+
+We installed `lerobot[smolvla]` v3.0, built the v3 dataset above, and
+launched `lerobot-train --policy.path=lerobot/smolvla_base
+--policy.device=mps --batch_size=1 --steps=10` against the freshly
+converted dataset. The base checkpoint is HuggingFace
+`lerobot/smolvla_base`, a 450M-param VLA built on the
+`HuggingFaceTB/SmolVLM2-500M-Video-Instruct` VLM backbone
+(https://huggingface.co/docs/lerobot/smolvla and the run-config dump
+in `/tmp/smolvla_train.log`, which shows exactly that
+`vlm_model_name` and `pretrained_path`).
+
+**Outcome at the time of writing**: the trainer process is still
+alive (`lerobot-train ... --output_dir
+.../runs/smolvla_real`), but the log stops at
+`Creating policy` / `torch_dtype is deprecated! Use dtype instead!`,
+and `apps/smolvla_trainer/runs/smolvla_real/` does not yet contain any
+checkpoint files. HuggingFace's own docs put a 20k-step SmolVLA
+fine-tune at ~4 hours on a single A100; we are attempting it on
+Apple MPS at batch size 1 with only 3 v3 episodes / 566 frames, which
+is well below the ~50-episode minimum the SmolVLA team recommends. So
+this is honestly characterised as **infra plumbed end-to-end, training
+launched, no real fine-tuned checkpoint produced inside the hackathon
+window**.
+
+## 8. What is deliberately not done yet
+
+- **Autonomous Jenga-stacking policy.** We built the platform and the
+  data pipeline. The shipped checkpoints are MLP/CNN baselines, not a
+  policy that will stack a tower.
+- **More episodes.** 6 collected, 3 of them with the overhead camera.
+  SmolVLA's own guidance is ~50 episodes minimum (25 was demonstrated
+  insufficient in their paper).
+- **Real follower observation in the dataset.** Today
+  `observation.state` is the leader's commanded pose - a proxy.
+  `follower_play --observed-log` is wired and ready; data was already
+  collected before the flag landed.
+- **Hand-eye calibration.** The depth detector
+  (`apps/depth_sensor/jenga_detect.py`) produces block poses in the
+  camera frame; converting to base frame needs `T_flange_cam` which
+  needs the leader/follower stack working end-to-end. Template lives
+  in `jonathanhawkins/jenga-stacker`.
+- **Live simultaneous two-dongle teleop on one Mac.** Documented as
+  an OS-level IOKit limitation, not a code defect; works on Linux
+  with SocketCAN and across two machines over `nc`.
+
+## 9. Reusable contributions
+
+For other PiPER-X / LeRobot users, the artefacts most worth lifting:
+
+- **`examples/piper-sdk-rs-patches/`** - the macOS Rust SDK patch set
+  (firmware-1.8-3 ID shift, IOKit no-reset, type-state drop fix,
+  gripper seed assertion) plus 9 single-purpose example binaries. This
+  is the only macOS-native PiPER stack we are aware of.
+- **`apps/soarm_leader/soarm_leader.py` + `follower_play.rs`** - a
+  working **cross-vendor** bilateral bridge: SO-101 Feetech serial ASCII
+  on one end, PiPER CAN on the other, JSON-lines in the middle.
+  Mappable to any leader that can emit `{t_us, joints_deg, gripper}`.
+- **`apps/dataset_builder/build_lerobot.py`** - a hand-rolled
+  jsonl + mp4 -> LeRobot v2 converter useful when you have raw episode
+  files that LeRobot's own recorder did not produce.
+- **`apps/smolvla_trainer/build_v3_dataset.py`** - the same source ->
+  LeRobot v3.0 converter built on the official
+  `LeRobotDataset.create()` API.
+- **`apps/bc_trainer/train_bc.py` and
+  `apps/smolvla_trainer/train_vision_bc.py`** - minimal, fast BC and
+  vision-BC trainers that run in single-digit-seconds on Apple Silicon
+  MPS and produce a checkpoint plus a sidecar `_meta.json` you can
+  cite directly. Useful as smoke tests before reaching for a real VLA.
+- **`ONBOARDING.md` sections 7, 9, 13, 14** - the operator's
+  troubleshooting matrix (USB stuck state, drag-teach LED semantics,
+  IOKit halt-state, depth-only-on-macOS) is the kind of writeup nobody
+  publishes and everybody needs.
