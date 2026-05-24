@@ -16,6 +16,7 @@ SDK clone itself is gitignored; this folder is the durable copy.
 | `play_poses.rs` | Reads `poses.txt` and streams each pose at 50 Hz for `--segment-secs` (default 4 s). `--sequence name_a,name_b,...` to play a subset in order. |
 | `frame_scan.rs` | Read-only raw CAN frame dump (200+ frames). Prints unique CAN IDs with hit counts + sample data. Use to diagnose firmware protocol shifts. |
 | `feedback_check.rs` | Read-only joint position observer for N seconds. Never enables/disables motors, so dropping the handle won't trigger auto-disable. Use to verify protocol-ID patches before any motion test. |
+| `leader_stream.rs` | Read-only joint angle streamer for bilateral teleop. Operator drags the arm by hand in drag-teach mode; this binary emits JSON lines `{"t_us": ..., "joints_deg": [...]}` at 50 Hz default. Optional `--out file.jsonl` for replay. Designed for **Bruce's arm as leader** while Raymond's arm catches up later. |
 
 ## Firmware patches
 

@@ -1,4 +1,4 @@
-# JengaBot bring-up — get a PiPER-X arm moving on macOS
+# JengaBot bring-up — get PiPER-X arms moving on macOS
 
 Stand-alone guide for someone joining the project. Skipping straight to "what
 do I install, what do I run, what breaks" instead of recapping the whole
@@ -7,6 +7,22 @@ debugging journey. The full story is in `SETUP.md` and the branch commits.
 > Verified end-to-end on macOS (Apple Silicon, darwin 25.5) + bytewerk
 > candleLight USB-CAN dongle + AgileX PiPER-X on firmware **S-V1.8-2** and
 > **S-V1.8-3** (each needs slightly different SDK state — see step 4).
+
+## The arms
+
+We have two PiPER-X arms in this project, with names everyone uses:
+
+| Arm | Role | Notes |
+|---|---|---|
+| **Bruce's arm** | **Leader** (currently the only one connected) | Originally on firmware S-V1.8-2; got updated to S-V1.8-3 mid-project. Has been the workhorse for every example we built — `joint_sweep`, `gripper_test`, `record_pose`, etc. |
+| **Raymond's arm** | **Follower** (joining later) | Firmware unknown until plugged in — run `frame_scan` against it to confirm and decide whether the ID-shift patch applies. |
+
+Each arm needs its **own candleLight dongle and its own CAN bus**. Don't try
+to chain them on one bus — the SDK driver claims the gs_usb interface
+exclusively, so two arms = two USB devices.
+
+Most of this doc covers single-arm bring-up (Bruce's arm). The leader/follower
+section near the end covers the two-arm path.
 
 ---
 
@@ -238,6 +254,14 @@ the full `position_control_demo`, or `gripper_test`.
   the physical button isn't available. Teach mode is **non-volatile** — power
   cycling does not clear it. Until teach mode is exited, `enable_position_mode`
   silently times out.
+- `leader_stream` — read-only joint angle streamer. Used to make the connected
+  arm act as the **leader** in bilateral teleop. The operator drags the arm
+  by hand in drag-teach mode (single-click button → LED solid green so
+  joints go limp); this binary emits one JSON line per tick:
+  `{"t_us": 123456789, "joints_deg": [...]}` at 50 Hz default. Never enables
+  motion, never changes state, so dropping does not auto-disable. Optional
+  `--out leader.jsonl` records a session for later replay. See section 13
+  for the leader/follower setup.
 
 ---
 
@@ -280,13 +304,96 @@ the full `position_control_demo`, or `gripper_test`.
   collected with `agilexrobotics/data_tools`, then deploy via
   `agilexrobotics/openpi-agilex`. Requires a Linux box with ≥22.5 GB GPU
   VRAM (RTX 4090 enough for LoRA).
-- **Leader/follower teleop (next):** second PiPER-X mirrors the first.
-  `dual_arm_bilateral_control` example in `piper-sdk-rs` does master-follower
-  via MIT mode (back-drivable leader, position-streamed follower). Needs
-  two dongles + two serials.
+- **Leader/follower teleop (next):** Raymond's arm mirrors Bruce's. See
+  section 13 below.
 
 See `SETUP.md` and `RESOURCES.md` in the repo root for deeper background and
 links to AgileX docs.
+
+---
+
+## 13. Leader/follower (Bruce → Raymond)
+
+The plan is bilateral teleop: the operator drags **Bruce's arm** by hand
+(drag-teach mode, motors compliant) and **Raymond's arm** mirrors the
+joint angles in real time. Both arms must be on independent CAN buses, each
+with its own candleLight dongle on the same Mac.
+
+### Phase A — leader only (current)
+
+Bruce is connected. Raymond is not. We can already run the leader half: read
+Bruce's joints as he's dragged and emit JSON lines that the follower will
+later consume.
+
+1. **Single-click** the button between J5 and J6 on Bruce so the LED is
+   **solid green**. Joints go compliant — you can move the arm by hand.
+2. Stream the joint angles:
+   ```bash
+   # to stdout, JSON lines, 50 Hz
+   sudo ./target/debug/examples/leader_stream
+
+   # higher rate + save to file for replay
+   sudo ./target/debug/examples/leader_stream --rate 100 --out leader.jsonl
+
+   # human-readable (debugging only — not the wire format)
+   sudo ./target/debug/examples/leader_stream --human
+   ```
+3. Ctrl+C to stop. The optional `--out` file is one JSON record per line,
+   easy to grep / `jq` / pipe into anything.
+4. After stopping, single-click the button again to take Bruce out of teach
+   mode (LED off). If you forget, the SDK on next run will see
+   `teach_status=1` and silently time out — run `exit_teach_mode` to
+   recover.
+
+### Phase B — adding Raymond
+
+When Raymond physically arrives:
+
+1. **Plug Raymond's candleLight dongle** into the Mac alongside Bruce's.
+   `ioreg -p IOUSB -l -w 0 | grep -B1 -A4 candleLight` should show
+   **two** entries — note both `USB Serial Number` values.
+2. **Power Raymond's arm** and confirm it's at the zero pose.
+3. **Check Raymond's firmware** by running `frame_scan` against just
+   Raymond's bus. (The smoke tools don't currently take a `--serial`,
+   so easiest is to physically unplug Bruce's dongle, run frame_scan,
+   then plug Bruce back in.) Apply the ID-shift patch if Raymond is on
+   S-V1.8-3 (probably yes — that's what shipped from AgileX recently).
+4. **Use the SDK's bundled `dual_arm_bilateral_control` example**, which
+   takes both serials and handles the per-arm SDK plumbing:
+   ```bash
+   sudo ./target/debug/examples/dual_arm_bilateral_control \
+       --left-serial  <BRUCE_SERIAL>  \
+       --right-serial <RAYMOND_SERIAL> \
+       --mode master-follower
+   ```
+   `master-follower` mode = leader's joints stream to follower as
+   targets. `bilateral` mode = both arms also push back on each other
+   via MIT impedance (more sophisticated, not needed for setup-Jenga).
+5. **Safety on Raymond.** Motors auto-disable on `Active` drop, which
+   means Raymond *falls* if `dual_arm_bilateral_control` errors mid-run.
+   Support it physically for the first session; use short test runs
+   (Ctrl+C in 5 seconds) to confirm clean disable before letting it run
+   unattended.
+
+### Architectural alternative — pipe `leader_stream` to a custom follower
+
+Instead of (or alongside) the SDK's bundled example, you can compose a
+follower out of `leader_stream` + a streamer-to-`send_position_command`
+shim. That gives you a clean network boundary if leader and follower live
+on different machines later (e.g. Bruce on Mac, Raymond on the Linux box
+that hosts the π₀.₅ inference server):
+
+```bash
+# on machine A: leader
+sudo .../leader_stream --rate 100 | nc remote-host 9000
+
+# on machine B: follower (TBD — small Rust loop that reads stdin
+# JSON lines and calls send_position_command against Raymond)
+```
+
+This is the same architecture power-vision uses for its Tauri ↔ Rust
+bridge — JSON lines over a transport, with the SDK held inside the
+follower process for the whole session.
 
 ---
 
