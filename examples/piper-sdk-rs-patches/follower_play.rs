@@ -255,6 +255,24 @@ where
     let gripper_seed: f64 = observer.gripper_state().position;
     eprintln!("seeded gripper at: {:.3}", gripper_seed);
 
+    // Override the firmware-default gripper energization: when
+    // enable_position_mode flips on the gripper motor, the firmware
+    // appears to drive it to its max-open (~0.696) before any user
+    // command lands. Repeatedly assert the seed position for ~250 ms so
+    // Bruce's gripper holds where the operator manually set it, instead
+    // of slamming open. After this loop the normal stream takes over.
+    {
+        let assert_until = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < assert_until {
+            if let Err(e) = active.set_gripper(gripper_seed.clamp(0.0, 1.0), 0.5) {
+                eprintln!("seed-gripper assert err: {e}");
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("gripper seed asserted");
+    }
+
     let shared = Arc::new(Mutex::new(TargetState {
         joints_deg: seed,
         gripper: None,
