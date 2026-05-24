@@ -1,0 +1,22 @@
+# Zero / home pose calibration captured on 2026-05-24T11:43:26-07:00
+# Both arms physically positioned by operator before this snapshot.
+
+# SO-101 leader (port /dev/cu.usbserial-110)
+#   raw values per servo (0..4095, ≈ 360°/4096 per step)
+SO101_RAW   = [2063, 1074, 1209, 2104, 995, 1734]
+SO101_DEG   = [181.32, 94.39, 106.26, 184.92, 87.45, 152.40]
+#                J1     J2      J3      J4      J5      gripper
+
+# Bruce follower (PiPER-X, serial 0028002A4148570C20343133)
+#   joint angles in degrees
+BRUCE_DEG   = [1.42, -2.13, 1.40, 3.15, 0.44, -4.15]
+#                J1    J2     J3    J4    J5    J6
+
+# Notes:
+#  - soarm_leader.py auto-zeros to whatever SO-101 raw it reads at
+#    startup, so this snapshot only matters if you want REPRODUCIBLE
+#    zero pose across sessions. Hand-position the arm to these raw
+#    values (within ~10 raw tolerance) before launching the leader.
+#  - follower_play seeds at Bruce's current joints (with J4 forced
+#    to 0). To park Bruce at BRUCE_DEG at startup, hand-position
+#    Bruce there before running.
