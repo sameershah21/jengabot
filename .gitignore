@@ -35,6 +35,7 @@ dataset_v3/
 # The 865 MB inference checkpoint under checkpoints/*/pretrained_model/ is tracked via git-lfs.
 apps/smolvla_trainer/runs/*/checkpoints/*/training_state/
 apps/smolvla_trainer/runs/*/checkpoints/last
+apps/smolvla_trainer/runs/*/loss_curve.txt
 
 # Original distribution zip
 JengaBot-repo.zip
