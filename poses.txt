@@ -1,0 +1,7 @@
+# JengaBot pose recordings
+# format: name j1 j2 j3 j4 j5 j6      (radians)
+# Placeholder poses derived from Bruce's current pose (May 2026 hackathon).
+# Replace with real Jenga poses captured via record_pose.
+home    -0.029500 -0.031416  0.004712  0.079235  0.517223  0.007679
+wave_a  -0.029500 -0.031416  0.004712  0.079235  0.517223  0.181514
+wave_b  -0.029500 -0.031416  0.004712  0.079235  0.517223 -0.166156

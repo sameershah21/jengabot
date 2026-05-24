@@ -15,5 +15,10 @@ JengaMaxxers/
 ArmRobotUA_*.zip
 armrobot/
 
+# Rust build dirs + Python venvs inside apps/
+apps/*/target/
+apps/*/.venv/
+**/Cargo.lock
+
 # Original distribution zip
 JengaBot-repo.zip

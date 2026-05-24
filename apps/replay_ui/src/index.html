@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>JengaBot Replay</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0d0e10;
+    --surface: #15171b;
+    --surface-2: #1c1f25;
+    --border: #2a2e36;
+    --text: #e8e9ea;
+    --text-dim: #9aa0a6;
+    --accent: #f5a623;
+    --accent-dim: #6a4a14;
+    --danger: #d64545;
+    --ok: #4caf6e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
+  }
+  header {
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 16px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  header .conn {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px;
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 24px;
+  }
+  section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 20px;
+  }
+  section h2 {
+    margin: 0 0 12px 0;
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .joints {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px 18px;
+  }
+  .joint {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+  }
+  .joint .label {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .joint .val {
+    font-size: 18px;
+    font-weight: 500;
+    margin-top: 4px;
+  }
+  .status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .badge {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .badge.playing { color: var(--accent); border-color: var(--accent-dim); }
+  .badge.idle    { color: var(--text-dim); }
+  .badge.error   { color: var(--danger); border-color: var(--danger); }
+  ol.steps {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+  ol.steps li::marker { color: var(--accent); }
+  .controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+  }
+  button {
+    flex: 1;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-family: inherit;
+    font-size: 12px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background .12s, border-color .12s;
+  }
+  button:hover { background: #232730; }
+  button.primary {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  button.primary:hover { background: rgba(245,166,35,.08); }
+  button.danger {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  button.danger:hover { background: rgba(214,69,69,.08); }
+  .pose-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .pose-list li {
+    padding: 7px 10px;
+    border-radius: 4px;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .pose-list li.active {
+    background: rgba(245,166,35,.08);
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+  }
+  .pose-list li .idx {
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+  .meta { display: flex; gap: 20px; margin-top: 8px; color: var(--text-dim); font-size: 11px; }
+  .repeat-box { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .repeat-box input {
+    width: 60px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .repeat-box label { color: var(--text-dim); font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>JengaBot · Replay</h1>
+  <span class="conn" id="conn">connecting…</span>
+</header>
+
+<main>
+  <section>
+    <h2>Live joint angles</h2>
+    <div class="joints" id="joints">
+      <!-- filled by JS -->
+    </div>
+    <div class="status-row">
+      <span id="status-badge" class="badge idle">idle</span>
+      <span id="status-text" style="color:var(--text-dim);font-size:11px"></span>
+    </div>
+    <div class="controls">
+      <button class="primary" id="btn-play">▶ Play</button>
+      <button id="btn-repeat">⟳ Repeat</button>
+      <button class="danger" id="btn-stop">■ Stop</button>
+    </div>
+    <div class="repeat-box">
+      <label for="repeats">repeat count</label>
+      <input id="repeats" type="number" value="3" min="0" max="999" />
+      <span style="color:var(--text-dim);font-size:11px">0 = infinite</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Instructions</h2>
+    <ol class="steps">
+      <li>Confirm Bruce's LED is <strong>off</strong> (CAN-controllable).</li>
+      <li>Workspace clear within ~625 mm of the base.</li>
+      <li>Choose your repeat count.</li>
+      <li>Press <span style="color:var(--accent)">▶ Play</span> to step through the recorded pose list once.</li>
+      <li>Press <span style="color:var(--accent)">⟳ Repeat</span> to run the list <em>N</em> times back-to-back.</li>
+      <li>Press <span style="color:var(--danger)">■ Stop</span> at any time. The arm holds the last commanded pose.</li>
+    </ol>
+
+    <h2 style="margin-top:22px">Pose playlist</h2>
+    <ul class="pose-list" id="pose-list">
+      <!-- filled by JS -->
+    </ul>
+    <div class="meta">
+      <span id="meta-iter"></span>
+      <span id="meta-elapsed"></span>
+    </div>
+  </section>
+</main>
+
+<script>
+  const JOINT_NAMES = ['J1','J2','J3','J4','J5','J6'];
+
+  function $(id) { return document.getElementById(id); }
+
+  function buildJoints() {
+    const el = $('joints');
+    el.innerHTML = '';
+    for (const n of JOINT_NAMES) {
+      const d = document.createElement('div');
+      d.className = 'joint';
+      d.innerHTML = `<div class="label">${n}</div><div class="val" id="joint-${n}">—</div>`;
+      el.appendChild(d);
+    }
+  }
+  buildJoints();
+
+  let lastPoses = [];
+
+  function renderPlaylist(state) {
+    if (JSON.stringify(state.poses) !== JSON.stringify(lastPoses)) {
+      const ul = $('pose-list');
+      ul.innerHTML = '';
+      state.poses.forEach((name, i) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span>${name}</span><span class="idx">${i + 1}</span>`;
+        li.dataset.idx = i;
+        ul.appendChild(li);
+      });
+      lastPoses = state.poses.slice();
+    }
+    // active highlight
+    const ul = $('pose-list');
+    for (const li of ul.children) {
+      const idx = parseInt(li.dataset.idx, 10);
+      if (state.current_pose && state.poses[idx] === state.current_pose) {
+        li.classList.add('active');
+      } else {
+        li.classList.remove('active');
+      }
+    }
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/state');
+      const s = await r.json();
+      $('conn').textContent = s.connected ? '● connected' : '○ not connected';
+      $('conn').style.color = s.connected ? 'var(--ok)' : 'var(--text-dim)';
+
+      for (let i = 0; i < 6; i++) {
+        const v = (s.joints_deg && typeof s.joints_deg[i] === 'number')
+          ? s.joints_deg[i].toFixed(2) + '°'
+          : '—';
+        $('joint-' + JOINT_NAMES[i]).textContent = v;
+      }
+
+      const badge = $('status-badge');
+      badge.textContent = s.status;
+      badge.className = 'badge';
+      if (s.status === 'playing') badge.classList.add('playing');
+      else if (s.status.startsWith('error')) badge.classList.add('error');
+      else badge.classList.add('idle');
+
+      $('status-text').textContent = s.current_pose
+        ? `pose: ${s.current_pose}  (${s.pose_index + 1}/${s.pose_count_total})`
+        : '';
+
+      $('meta-iter').textContent =
+        (s.status === 'playing') ? `iteration ${s.iteration + 1}` : '';
+      $('meta-elapsed').textContent =
+        s.current_pose ? `${s.elapsed_pose_secs.toFixed(1)}s in pose` : '';
+
+      renderPlaylist(s);
+    } catch (e) {
+      $('conn').textContent = '⚠ server unreachable';
+      $('conn').style.color = 'var(--danger)';
+    }
+  }
+  setInterval(poll, 150);
+  poll();
+
+  async function post(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  $('btn-play').onclick = () => post('/play', { repeats: 1 });
+  $('btn-repeat').onclick = () => {
+    const n = parseInt($('repeats').value, 10);
+    post('/play', { repeats: Number.isFinite(n) ? n : 1 });
+  };
+  $('btn-stop').onclick = () => post('/stop');
+</script>
+</body>
+</html>

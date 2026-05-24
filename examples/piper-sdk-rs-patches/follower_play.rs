@@ -68,6 +68,12 @@ struct Args {
     #[arg(long, default_value = "2.0")]
     max_step_deg: f64,
 
+    /// Treat incoming joints_deg as DELTAS added to the seed pose, instead
+    /// of as absolute joint angles. Use this when the leader's zero pose
+    /// differs from the follower's (e.g. SO-101 leader → PiPER follower).
+    #[arg(long, default_value = "false")]
+    incremental: bool,
+
     /// If no leader update arrives in this many ms, hold last pose.
     #[arg(long, default_value = "500")]
     watchdog_ms: u64,
@@ -275,6 +281,13 @@ where
             let s = shared.lock().unwrap();
             if !s.initialized || s.last_update.elapsed() > watchdog {
                 prev_sent
+            } else if args.incremental {
+                // Add deltas from leader to our seed pose
+                let mut t = [0.0; 6];
+                for i in 0..6 {
+                    t[i] = seed[i] + s.joints_deg[i];
+                }
+                t
             } else {
                 s.joints_deg
             }
