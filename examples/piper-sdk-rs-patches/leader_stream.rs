@@ -81,13 +81,16 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = &args.interface;
-            PiperBuilder::new()
-                .gs_usb_auto()
+            let builder = PiperBuilder::new()
                 .baud_rate(args.baud_rate)
                 .feedback_timeout(Duration::from_secs(10))
-                .firmware_timeout(Duration::from_secs(5))
-                .build()?
+                .firmware_timeout(Duration::from_secs(5));
+            let builder = if args.interface == "auto" {
+                builder.gs_usb_auto()
+            } else {
+                builder.gs_usb_serial(&args.interface)
+            };
+            builder.build()?
         }
     };
     eprintln!("connected.");
