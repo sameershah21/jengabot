@@ -1,0 +1,17 @@
+{
+  "stamp": "20260524_132821",
+  "dataset": "/Users/sameershah/learn/github/jengabot/dataset",
+  "epochs": 300,
+  "batch": 64,
+  "hidden": 128,
+  "lr": 0.001,
+  "device": "mps",
+  "params": 18439,
+  "train_frames": 1276,
+  "val_frames": 141,
+  "final_train_loss": 0.0777715659907619,
+  "final_val_loss": 0.0775723230120138,
+  "elapsed_sec": 13.41,
+  "checkpoint": "/Users/sameershah/learn/github/jengabot/apps/bc_trainer/models/bc_20260524_132821.pt",
+  "checkpoint_int8": null
+}
