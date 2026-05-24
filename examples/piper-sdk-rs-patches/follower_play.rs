@@ -243,9 +243,13 @@ where
         }
         got
     };
-    let seed = initial.unwrap_or([0.0; 6]);
+    let mut seed = initial.unwrap_or([0.0; 6]);
+    // Force Bruce J4 (index 3) to 0° at startup. SO-101 does not drive
+    // this joint, and parking it at 0 gives a known-good starting pose
+    // for the JengaBot demo. Bruce streams to 0° at max_step_deg/tick.
+    seed[3] = 0.0;
     eprintln!(
-        "seeded follower at current pose: {:?}",
+        "seeded follower at current pose: {:?} (J4 forced to 0°)",
         seed.map(|x| (x * 100.0).round() / 100.0)
     );
 

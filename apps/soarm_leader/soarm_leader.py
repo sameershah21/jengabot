@@ -64,15 +64,15 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--port', default='/dev/cu.usbserial-110')
     ap.add_argument('--baud', type=int, default=1_000_000)
-    ap.add_argument('--scale', type=float, default=0.6,
-                    help='Multiplier on every joint delta before emit. 0.6 worked well in '
-                         'live SO-101 → Bruce testing — bigger SO-101 motion = visibly bigger '
-                         'Bruce motion without overwhelming the follower step clamp.')
-    ap.add_argument('--signs', default='1,1,-1,1,1,1',
+    ap.add_argument('--scale', type=float, default=1.0,
+                    help='Multiplier on every joint delta before emit. 1.0 = 1:1 SO-101 to '
+                         'PiPER mapping. Operator chose more amplification mid-hackathon to '
+                         'make Bruce motion match SO-101 motion magnitude-for-magnitude.')
+    ap.add_argument('--signs', default='-1,1,-1,1,1,1',
                     help='Per-joint sign (+1 or -1). 6 entries for J1..J5 + gripper. '
-                         'Default flips J3 because PiPER J3 range is [-175°, 0°] (negative '
-                         'only) — without the flip, half of SO-101 J3 motion lands above 0 '
-                         'and gets silently clamped to zero on Bruce.')
+                         'Defaults: J1 inverted (operator-observed direction mismatch), '
+                         'J3 inverted (PiPER J3 range is [-175°, 0°] so half of SO-101 J3 '
+                         'motion lands above 0 and gets clamped on Bruce without the flip).')
     ap.add_argument('--human', action='store_true',
                     help='Print human-readable angles to stdout instead of JSON')
     ap.add_argument('--max-emit-hz', type=float, default=50.0,
