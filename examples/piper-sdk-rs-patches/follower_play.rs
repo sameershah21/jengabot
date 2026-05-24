@@ -74,6 +74,14 @@ struct Args {
     #[arg(long, default_value = "false")]
     incremental: bool,
 
+    /// Exponential smoothing coefficient on the target, [0..1).
+    /// 0 = no smoothing (snappy, can feel choppy when leader rate is low).
+    /// 0.9 = moderate smoothing (~200 ms time constant @ 50 Hz tick).
+    /// 0.95 = heavier smoothing (~400 ms time constant). Best for
+    /// low-rate leaders like SO-101's ~2 Hz board firmware.
+    #[arg(long, default_value = "0.0")]
+    smoothing: f64,
+
     /// If no leader update arrives in this many ms, hold last pose.
     #[arg(long, default_value = "500")]
     watchdog_ms: u64,
@@ -266,6 +274,11 @@ where
 
     let watchdog = Duration::from_millis(args.watchdog_ms);
     let mut prev_sent = seed;
+    // Smoothed target — slews exponentially toward the latest leader target
+    // so low-rate leaders (like SO-101's ~2 Hz board firmware) don't produce
+    // "burst-then-wait" follower motion.
+    let mut target_smoothed = seed;
+    let smoothing = args.smoothing.clamp(0.0, 0.999);
     let run_until: Option<Instant> = args
         .hold_seconds
         .map(|s| Instant::now() + Duration::from_secs(s));
@@ -293,10 +306,21 @@ where
             }
         };
 
+        // Apply exponential smoothing to the raw target before clamping.
+        // target_smoothed = α * target_smoothed + (1-α) * target
+        if smoothing > 0.0 {
+            for i in 0..6 {
+                target_smoothed[i] = smoothing * target_smoothed[i]
+                    + (1.0 - smoothing) * target[i];
+            }
+        } else {
+            target_smoothed = target;
+        }
+
         // Clamp + step-limit
         let mut next = [0.0_f64; 6];
         for i in 0..6 {
-            let clamped = clamp_joint(i, target[i]);
+            let clamped = clamp_joint(i, target_smoothed[i]);
             next[i] = clamp_step(prev_sent[i], clamped, args.max_step_deg);
         }
 
