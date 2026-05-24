@@ -25,6 +25,7 @@ SDK clone itself is gitignored; this folder is the durable copy.
 |---|---|
 | `firmware-1.8-3-id-shift.patch` | **PiPER-X firmware S-V1.8-3 fix.** Shifts cold-feedback CAN IDs by +0xFF: `0x2A1`→`0x3A0` (ROBOT_STATUS), `0x2A2-4`→`0x3A1-3` (END_POSE), `0x2A5-7`→`0x3A4-6` (JOINT_FEEDBACK), `0x2A8`→`0x3A7` (GRIPPER). Hot data (`0x251-6`) and low-speed (`0x261-6`) unchanged. Apply with `git apply` inside the piper-sdk-rs checkout. Diagnosed via `frame_scan` reading raw 1.8-3 frames; verified via `feedback_check`. |
 | `firmware-1.8-3-yolo.patch` | **DANGEROUS — only use as fallback.** Bypasses the SDK's mode-confirmation / enabled / disabled / freshness checks. Was used as a stop-gap before the real ID fix was found. Caused an arm-drop incident because joint-position reads still failed after motors were enabled. Prefer `firmware-1.8-3-id-shift.patch`. |
+| `macos-no-reset-on-start.patch` | **Concurrent multi-arm fix (partial).** Drops the `handle.reset()` call at the top of `GsUsbDevice::start()`. macOS libusb invalidates the file descriptor when a second SDK calls `reset()` on its own device shortly after — both die. With this patch, two SDK processes can init concurrently against two candleLight dongles. Still leaves an unresolved follow-on issue where Bruce's RX thread reports `USB error: Other error` once both arms are streaming — see ONBOARDING section 13 for state of leader/follower live teleop. |
 
 ## Apply / build
 

@@ -1,0 +1,29 @@
+diff --git a/crates/piper-can/src/gs_usb/device.rs b/crates/piper-can/src/gs_usb/device.rs
+index fa05e39..e48acb4 100644
+--- a/crates/piper-can/src/gs_usb/device.rs
++++ b/crates/piper-can/src/gs_usb/device.rs
+@@ -621,15 +621,15 @@ impl GsUsbDevice {
+     /// 注意：start() 内部会 reset，但 reset 不会清除之前设置的 bitrate
+     /// 因为 bitrate 是通过控制请求设置的，是持久化配置
+     pub fn start(&mut self, flags: u32) -> Result<StartResult, GsUsbError> {
+-        // 推荐流程：reset() -> detach_kernel_driver() -> 获取 capability -> 过滤 flags -> 发送 MODE
+-
+-        // 1. Reset 设备（start() 内部 reset，最前面）
+-        // 注意：reset 不会清除之前设置的 bitrate，因为 bitrate 是持久化配置
+-        // 但 reset 可能会清除接口 claim 状态，所以需要在 reset 后重新处理接口
+-        if let Err(e) = self.handle.reset() {
+-            trace!("Device reset failed (may be normal): {}", e);
+-            // 不立即返回错误，继续尝试后续步骤
+-        }
++        // JengaBot patch: drop the up-front handle.reset() so that two
++        // GS-USB SDK instances can init concurrently on the same Mac
++        // (e.g. leader on Raymond + follower on Bruce). reset()
++        // re-enumerates the USB device, and when two SDKs reset() in
++        // parallel macOS invalidates both descriptors → both die.
++        // We keep the bitrate persistent and rely on the MODE command
++        // below to bring the controller into NORMAL state. If the
++        // device is in a weird state, user can replug to recover —
++        // same recovery path we needed even with reset() present.
+ 
+         // 2. Detach kernel driver on Linux/macOS（在 reset 之后）
+         // 注意：detach_kernel_driver() 在 reset() 之后执行
