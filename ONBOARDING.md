@@ -108,6 +108,29 @@ exercises one part of the stack.
 cp examples/piper-sdk-rs-patches/*.rs piper-sdk-rs/crates/piper-sdk/examples/
 ```
 
+After the `cp`, the following Rust files must exist in
+`piper-sdk-rs/crates/piper-sdk/examples/`:
+
+| File | Source | Purpose |
+|---|---|---|
+| `gs_usb_direct_test.rs` | **upstream** (vivym/piper-sdk-rs) | Raw USB smoke test |
+| `exit_teach_mode.rs` | ours (patches folder) | Send raw CAN 0x150 to exit drag-teach |
+| `frame_scan.rs` | ours | Passive 200+ frame CAN ID histogram |
+| `feedback_check.rs` | ours | Read-only joint observer (verify ID patch) |
+| `position_control_demo.rs` | ours (replaces upstream) | Patched demo: extended timeouts, Maintenance→Standby, 50 Hz streaming |
+| `joint_sweep.rs` | ours | Exercise each joint ±N° individually |
+| `gripper_test.rs` | ours | OPEN→CLOSE→HALF→CLOSE-HARD→OPEN cycle |
+| `record_pose.rs` | ours | Drag the arm by hand → save pose to `poses.txt` |
+| `play_poses.rs` | ours | Stream a recorded `poses.txt` sequence |
+| `leader_stream.rs` | ours | JSON-line joint stream for bilateral teleop (Bruce as leader) |
+
+Sanity check after `cp`:
+
+```bash
+ls piper-sdk-rs/crates/piper-sdk/examples/ | grep -E '^(gs_usb_direct_test|exit_teach_mode|frame_scan|feedback_check|position_control_demo|joint_sweep|gripper_test|record_pose|play_poses|leader_stream)\.rs$' | sort | uniq -c
+# Should print 10 lines, each with count = 1.
+```
+
 **(b) The firmware patches.** Decide based on what your arm reports.
 First check by running `frame_scan` against your arm (step 7) — if you see
 `0x3A0–0x3A7` you're on **S-V1.8-3** and need the ID shift; if you see
@@ -128,6 +151,9 @@ is the real fix. The yolo file is preserved only as a paper trail.
 
 ## 5. Build the example binaries
 
+Builds all 10 examples in one cargo invocation. Each `--example` flag matches
+exactly one of the files listed in section 4(a).
+
 ```bash
 cd piper-sdk-rs
 cargo build -p piper-sdk \
@@ -139,11 +165,20 @@ cargo build -p piper-sdk \
   --example joint_sweep \
   --example gripper_test \
   --example record_pose \
-  --example play_poses
+  --example play_poses \
+  --example leader_stream
 ```
 
 First build takes 2–3 minutes (lots of transitive crates). Re-builds after
-small edits are seconds.
+small edits are seconds. Binaries land at
+`piper-sdk-rs/target/debug/examples/<name>`.
+
+After a successful build, verify all 10 binaries exist:
+
+```bash
+ls -1 target/debug/examples/ | grep -E '^(gs_usb_direct_test|exit_teach_mode|frame_scan|feedback_check|position_control_demo|joint_sweep|gripper_test|record_pose|play_poses|leader_stream)$'
+# Should print 10 lines.
+```
 
 ---
 
