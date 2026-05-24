@@ -507,3 +507,121 @@ sudo ./target/debug/examples/dual_arm_bilateral_control \
   Windows Python FastAPI single-arm web dashboard)
 - **AgileX support** at `support@agilex.ai` for firmware downloads,
   ArmRobot.exe (Windows-only flashing tool), and Yuque docs access.
+
+---
+
+## 14. Depth sensing — Orbbec DaBai DC1 (eye-in-hand on Bruce)
+
+The follower arm has an **Orbbec DaBai DC1** (USB vendor `0x2bc5`, depth
+pid `0x0657`) mounted on the flange. First-cut depth pipeline lives in
+[`apps/depth_sensor/`](apps/depth_sensor/). Verified working on macOS
+arm64 with `pyorbbecsdk` 1.3.2.
+
+### Camera quick facts (measured)
+
+- Depth: **640×400 @ 30 fps, Y11** (also offers 1280×800 @ 7fps)
+- Intrinsics: `fx=fy=477.8`, `cx=322.9`, `cy=199.0`
+- `frame.get_depth_scale()` returns mm per uint16 unit
+- Serial `CC1N16201DS`, firmware `RD1001`
+
+### Two macOS gotchas (don't relearn these)
+
+1. **Python 3.11 only.** `pyorbbecsdk` ships an Apple Silicon wheel only
+   for `cp311 universal2`. 3.12+ has no wheel. The pyenv-installed
+   3.11.4 has a urllib3/OpenSSL-3.6 pip bug — use Homebrew's
+   `/opt/homebrew/bin/python3.11` for the venv.
+2. **Don't open the COLOR sensor.** macOS UVC kernel driver claims the
+   color interface and any pyorbbecsdk attempt at it fails with
+   `uvc_open ... res:-3` (ACCESS). The depth IR interface is separate
+   and libusb-claimable without root, so **no sudo** as long as we stay
+   depth-only. Our scripts already do this. A sudoers rule would only
+   be needed if/when we add RGB.
+
+### What's in `apps/depth_sensor/`
+
+| File | Purpose |
+|---|---|
+| `orbbec_probe.py` | Smoke test — open depth, grab median frame, save raw 16-bit mm + colorized PNG to `snapshots/`. |
+| `jenga_detect.py` | First-cut detector — depth → point cloud → RANSAC plane → height-band mask → connected components → `minAreaRect` with Jenga footprint gate (75×25×15 mm ±). Prints `(x,y,z, long, short, tall, yaw, npts)` per candidate in camera frame; overlay PNG in `snapshots/`. |
+| `.venv/` | Homebrew-python3.11 venv with `pyorbbecsdk`, `opencv-python`, `numpy` (gitignored). |
+
+### Setup from scratch (skip if `.venv/` already exists)
+
+If a fresh clone or a new machine, build the env once. Uses Homebrew's
+python3.11 — **not** pyenv's 3.11.4 (its bundled pip/urllib3 crashes
+against OpenSSL 3.6 with `AttributeError: 'NoneType' object has no
+attribute 'get'`).
+
+```bash
+brew install python@3.11   # if not already there
+
+cd ~/learn/github/jengabot/apps/depth_sensor
+/opt/homebrew/bin/python3.11 -m venv .venv
+.venv/bin/python -m pip install --disable-pip-version-check \
+    pyorbbecsdk opencv-python numpy
+```
+
+Verify the camera is enumerated:
+
+```bash
+.venv/bin/python -c "
+import pyorbbecsdk as ob
+dl = ob.Context().query_devices()
+print('devices:', dl.get_count())
+for i in range(dl.get_count()):
+    info = dl.get_device_by_index(i).get_device_info()
+    print(' ', info.get_name(), 'pid=0x%04x' % info.get_pid(),
+          'sn=', info.get_serial_number())
+"
+# Expect: devices: 1 / DaBai DC1 pid=0x0657 sn=CC1N16201DS
+```
+
+If `devices: 0`: replug the Orbbec USB cable (same dirty-state habit as
+the candleLight dongle, but rarer). The Orbbec does **not** need the
+USB-replug-between-runs dance the candleLight does — the pipeline cleans
+up cleanly on `pipe.stop()`.
+
+### Run
+
+```bash
+cd ~/learn/github/jengabot/apps/depth_sensor
+
+# Smoke test — does the camera stream?
+.venv/bin/python orbbec_probe.py
+# -> snapshots/depth_<ts>.png + depth_<ts>_vis.png
+
+# First-cut block detector
+.venv/bin/python jenga_detect.py
+# -> snapshots/detect_<ts>_vis.png + detect_<ts>_mask.png + stdout table
+```
+
+### Coordinate frame
+
+Detections are in the **camera optical frame** (x right, y down, z
+forward, in metres). Putting them into the arm base frame needs the
+**camera→flange hand-eye transform**, which we don't have yet. Until
+hand-eye calibration is recorded, the detector is useful for tuning
+geometry / visualizing block presence, not for direct arm commands.
+
+### Prior art — highly relevant
+
+[`jonathanhawkins/jenga-stacker`](https://github.com/jonathanhawkins/jenga-stacker)
+runs the **same exact hardware** (AgileX PiPER + Orbbec DaBai DC1
+eye-in-hand). They confirm everything above. Their
+`src/jenga/orbbec_camera.py`, `src/jenga/perception3d.py` (deproject +
+tower-model fit) and `scripts/calibrate_handeye.py` are good templates to
+lift from when we extend.
+
+### Known open work
+
+- **Hand-eye calibration.** Needs the arm controllable end-to-end
+  (depends on the leader/follower work). Output is `handeye.yaml`
+  storing the 4×4 `T_flange_cam`. See `jenga-stacker/scripts/calibrate_handeye.py`
+  for procedure.
+- **Tune for the real table.** The detector's `--thick-min-mm`,
+  `--thick-max-mm`, footprint gates and cluster sizes were set
+  generously. Re-tune with the camera aimed at the actual jenga table.
+- **RGB.** If colour ends up being required (texture, jenga-text
+  detection, etc.), add a sudoers rule scoped to
+  `apps/depth_sensor/.venv/bin/python apps/depth_sensor/*.py` — same
+  pattern as `/etc/sudoers.d/piper-hackathon`.

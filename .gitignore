@@ -20,5 +20,15 @@ apps/*/target/
 apps/*/.venv/
 **/Cargo.lock
 
+# depth_sensor: auto-generated runs + logs
+apps/depth_sensor/snapshots/
+apps/depth_sensor/Log/
+
+# Episode recordings (heavy: mp4 + jsonl). Keep small samples if needed.
+episodes/
+
+# Derived LeRobot dataset (regenerate via apps/dataset_builder/build_lerobot.py)
+dataset/
+
 # Original distribution zip
 JengaBot-repo.zip

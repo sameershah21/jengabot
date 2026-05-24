@@ -82,6 +82,14 @@ struct Args {
     #[arg(long, default_value = "0.0")]
     smoothing: f64,
 
+    /// If set, log Bruce's observed joint angles + gripper to this file
+    /// as JSON lines, one per stream tick. Format mirrors leader_stream:
+    ///   {"t_us": <unix_us>, "joints_deg": [j1..j6], "gripper": <0..1>}
+    /// Used by the dataset_builder to populate `observation.state`
+    /// instead of using the leader command as a proxy.
+    #[arg(long)]
+    observed_log: Option<std::path::PathBuf>,
+
     /// If no leader update arrives in this many ms, hold last pose.
     #[arg(long, default_value = "500")]
     watchdog_ms: u64,
@@ -290,6 +298,17 @@ where
         ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst)).ok();
     }
 
+    // Open the observed-log sink if requested.
+    let observed_log: Option<std::sync::Mutex<std::io::BufWriter<std::fs::File>>> =
+        args.observed_log.as_ref().map(|p| {
+            let f = std::fs::OpenOptions::new()
+                .create(true).write(true).truncate(true)
+                .open(p)
+                .unwrap_or_else(|e| panic!("cannot open observed-log {}: {e}", p.display()));
+            eprintln!("observed-log → {}", p.display());
+            std::sync::Mutex::new(std::io::BufWriter::new(f))
+        });
+
     // stdin reader thread (only spawn if not in smoke-test mode)
     if args.hold_seconds.is_none() {
         let shared = shared.clone();
@@ -402,6 +421,34 @@ where
                 eprintln!("gripper err: {e}");
             }
         }
+
+        // Observed-state log: read Bruce's actual joints + gripper and
+        // append one JSON line per tick to --observed-log. Same wire
+        // format as leader_stream so dataset_builder can ingest it.
+        if let Some(sink) = observed_log.as_ref() {
+            if let Ok(obs_joints) = observer.joint_positions() {
+                let obs_g = observer.gripper_state().position;
+                let t_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros() as u64)
+                    .unwrap_or(0);
+                let mut w = sink.lock().unwrap();
+                use std::io::Write;
+                let _ = writeln!(
+                    w,
+                    "{{\"t_us\":{},\"joints_deg\":[{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}],\"gripper\":{:.4}}}",
+                    t_us,
+                    obs_joints[0].to_deg().0,
+                    obs_joints[1].to_deg().0,
+                    obs_joints[2].to_deg().0,
+                    obs_joints[3].to_deg().0,
+                    obs_joints[4].to_deg().0,
+                    obs_joints[5].to_deg().0,
+                    obs_g,
+                );
+            }
+        }
+
         prev_sent = next;
         thread::sleep(STREAM_PERIOD);
     }

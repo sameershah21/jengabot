@@ -68,11 +68,12 @@ def main():
                     help='Multiplier on every joint delta before emit. 1.0 = 1:1 SO-101 to '
                          'PiPER mapping. Operator chose more amplification mid-hackathon to '
                          'make Bruce motion match SO-101 motion magnitude-for-magnitude.')
-    ap.add_argument('--signs', default='-1,1,-1,1,1,1',
+    ap.add_argument('--signs', default='-1,1,-1,1,-1,1',
                     help='Per-joint sign (+1 or -1). 6 entries for J1..J5 + gripper. '
-                         'Defaults: J1 inverted (operator-observed direction mismatch), '
-                         'J3 inverted (PiPER J3 range is [-175°, 0°] so half of SO-101 J3 '
-                         'motion lands above 0 and gets clamped on Bruce without the flip).')
+                         'Defaults: J1 inverted (direction mismatch), J3 inverted (PiPER J3 '
+                         'range is [-175°, 0°] so half of SO-101 J3 motion lands above 0 '
+                         'and gets clamped on Bruce), J5 inverted (operator-observed J6 '
+                         'control mismatch — SO-101 J5 drives Bruce J6).')
     ap.add_argument('--human', action='store_true',
                     help='Print human-readable angles to stdout instead of JSON')
     ap.add_argument('--max-emit-hz', type=float, default=50.0,
@@ -135,6 +136,15 @@ def main():
 
     grip_sign = -1.0 if args.gripper_invert else 1.0
 
+    # Unwrap state per servo: STS3215 raw is 0..4095 (12-bit). If a joint
+    # crosses the boundary (e.g. 4090 → 5 in one tick), the naive delta
+    # looks like a full backward rotation. Track the previous raw and
+    # accumulate a multi-revolution offset so the emitted delta stays
+    # continuous and direction-correct.
+    prev_raw = list(zero)
+    wrap_offset = [0] * 6
+    WRAP_HALF = 2048  # half of 4096
+
     try:
         while True:
             line = ser.readline()
@@ -157,10 +167,24 @@ def main():
             if vals is None:
                 continue
 
+            # Unwrap: if a servo's raw jumped more than half-rotation since
+            # last reading, assume it crossed the 0/4095 boundary. Adjust
+            # wrap_offset so effective[i] = vals[i] + wrap_offset[i] stays
+            # continuous. Keeps deltas in the correct direction across the
+            # boundary instead of flipping ±360°.
+            for i in range(6):
+                diff = vals[i] - prev_raw[i]
+                if diff > WRAP_HALF:
+                    wrap_offset[i] -= 4096
+                elif diff < -WRAP_HALF:
+                    wrap_offset[i] += 4096
+                prev_raw[i] = vals[i]
+            effective = [vals[i] + wrap_offset[i] for i in range(6)]
+
             if args.no_gripper:
                 # 6 joint deltas, no gripper (legacy behavior)
-                joints_deg = [(v - z) * RAW_TO_DEG * args.scale * sign
-                              for v, z, sign in zip(vals, zero, signs)]
+                joints_deg = [(effective[i] - zero[i]) * RAW_TO_DEG * args.scale * signs[i]
+                              for i in range(6)]
                 gripper_delta = 0.0
             else:
                 # Joint remapping (observed live + operator-requested):
@@ -173,7 +197,7 @@ def main():
                 #   4 (J5)            →  5 (J6)
                 # Bruce J4 (idx 3) holds at seed — no SO-101 source.
                 def delta(i):
-                    return (vals[i] - zero[i]) * RAW_TO_DEG * args.scale * signs[i]
+                    return (effective[i] - zero[i]) * RAW_TO_DEG * args.scale * signs[i]
                 joints_deg = [
                     delta(0),   # Bruce J1
                     delta(1),   # Bruce J2
