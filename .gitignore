@@ -31,8 +31,10 @@ episodes/
 dataset/
 dataset_v3/
 
-# SmolVLA fine-tune output (865 MB checkpoint exceeds GitHub limit; reproduce with apps/smolvla_trainer/README.md)
-apps/smolvla_trainer/runs/
+# SmolVLA fine-tune output: optimizer state is 394 MB and only useful for resume — gitignored.
+# The 865 MB inference checkpoint under checkpoints/*/pretrained_model/ is tracked via git-lfs.
+apps/smolvla_trainer/runs/*/checkpoints/*/training_state/
+apps/smolvla_trainer/runs/*/checkpoints/last
 
 # Original distribution zip
 JengaBot-repo.zip

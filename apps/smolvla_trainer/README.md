@@ -15,7 +15,7 @@ option.
 | `build_v3_dataset.py`      | Convert raw `episodes/*.jsonl + mp4` into a **LeRobot v3.0** dataset (uses official LeRobotDataset.create()) |
 | `train_vision_bc.py`       | Train a small CNN + state -> action MLP on the v2 parquet dataset. Saves `models/vision_bc_*.pt`   |
 | `models/vision_bc_*.pt`    | Trained vision-BC checkpoint (1.4 MB)                                                              |
-| `runs/smolvla_real/`       | Output of the real SmolVLA fine-tune (~865 MB checkpoint, **not committed**; reproduce locally)    |
+| `runs/smolvla_real/checkpoints/000200/pretrained_model/` | The real fine-tuned SmolVLA inference checkpoint. **Committed via git-lfs** (865 MB) and mirrored to https://huggingface.co/pilarclark/jengabot-smolvla-jenga |
 
 ## Reproducing the SmolVLA fine-tune
 
@@ -74,8 +74,15 @@ The checkpoint is real and loadable via
   `--rename_map` maps our `top->camera1` and `dabai->camera2`; `camera3`
   is silently dropped by lerobot. Adding a third view (e.g., depth as RGB)
   would let the model use the full 3-cam tower it was pretrained with.
-- 865 MB safetensors checkpoint exceeds GitHub's 100 MB per-file limit
-  and is not committed. The trainer reproduces it in ~90 seconds.
+- The 865 MB safetensors checkpoint is committed via **git-lfs**
+  (`.gitattributes` tracks `*.safetensors`). You'll need `git-lfs`
+  installed locally for `git clone` to pull the weights. The same
+  checkpoint is also published as a Hugging Face model repo at
+  https://huggingface.co/pilarclark/jengabot-smolvla-jenga and can be
+  loaded directly with
+  `SmolVLAPolicy.from_pretrained("pilarclark/jengabot-smolvla-jenga")`.
+- The 394 MB optimizer state (`checkpoints/000200/training_state/`) is
+  gitignored — only useful for resuming training, not inference.
 
 ## Vision-BC fallback
 
