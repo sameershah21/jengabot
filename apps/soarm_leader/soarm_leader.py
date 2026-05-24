@@ -73,10 +73,19 @@ def main():
     ap.add_argument('--max-emit-hz', type=float, default=50.0,
                     help='Cap output rate. If the board emits slower, we emit slower.')
     # Gripper-specific
-    ap.add_argument('--gripper-closed', type=int, default=1500,
-                    help='SO-101 gripper raw value when fully closed (probably 1500-2000). Tune by inspecting --human output.')
-    ap.add_argument('--gripper-open', type=int, default=2800,
-                    help='SO-101 gripper raw value when fully open (probably 2500-3000)')
+    ap.add_argument('--gripper-scale', type=float, default=3.0,
+                    help='Multiplier on the gripper raw-delta before normalizing to a 0..1 step. '
+                         'Bigger = Bruce moves more per SO-101 squeeze. Default 3.0 lets a '
+                         '~330-raw SO-101 squeeze span Bruce\'s full [0,1] gripper range. '
+                         'In follower_play --incremental mode this becomes an additive delta '
+                         'on Bruce\'s seed gripper position.')
+    ap.add_argument('--gripper-invert', action='store_true',
+                    help='Flip sign of the gripper delta (if Bruce opens when SO-101 closes).')
+    ap.add_argument('--gripper-deadband', type=float, default=0.05,
+                    help='Suppress the gripper field when |delta| < this. Prevents Bruce '
+                         'from being commanded at startup (when SO-101 is at rest, delta≈0). '
+                         'Bruce will hold whatever physical position it was in until you '
+                         'actually squeeze SO-101 past the deadband.')
     ap.add_argument('--no-gripper', action='store_true',
                     help='Omit the gripper field from JSON output (treat all 6 as joints, original behavior).')
     args = ap.parse_args()
@@ -114,9 +123,13 @@ def main():
     last_emit = 0.0
     # joints_deg has 6 entries (J1..J5 + a zero-padded J6 so PiPER J6 stays at seed).
     last_good_deg = [0.0] * 6
-    last_good_gripper = 0.5  # half-open default
+    # Gripper output is now a DELTA in [-∞..∞], typically ≈ [-1..1] for normal
+    # squeeze range. follower_play in --incremental mode adds this delta to
+    # Bruce's seed gripper position, so Bruce starts wherever it already is
+    # rather than snapping to "full open" or any fixed value.
+    last_good_gripper = 0.0
 
-    grip_span = max(1, args.gripper_open - args.gripper_closed)
+    grip_sign = -1.0 if args.gripper_invert else 1.0
 
     try:
         while True:
@@ -126,7 +139,13 @@ def main():
                 # follower doesn't hit its stdin watchdog.
                 now = time.monotonic()
                 if now - last_emit >= period:
-                    emit(args.human, last_good_deg, last_good_gripper, args.no_gripper)
+                    grip_for_emit = (
+                        last_good_gripper
+                        if (not args.no_gripper)
+                           and abs(last_good_gripper) >= args.gripper_deadband
+                        else None
+                    )
+                    emit(args.human, last_good_deg, grip_for_emit, args.no_gripper)
                     last_emit = now
                 continue
 
@@ -138,7 +157,7 @@ def main():
                 # 6 joint deltas, no gripper (legacy behavior)
                 joints_deg = [(v - z) * RAW_TO_DEG * args.scale * sign
                               for v, z, sign in zip(vals, zero, signs)]
-                gripper_norm = 0.5
+                gripper_delta = 0.0
             else:
                 # First 5 SO-101 servos = J1..J5 → PiPER J1..J5 deltas.
                 # PiPER J6 padded with 0 (no delta → seed pose holds).
@@ -146,31 +165,47 @@ def main():
                     (vals[i] - zero[i]) * RAW_TO_DEG * args.scale * signs[i]
                     for i in range(5)
                 ] + [0.0]
-                # 6th SO-101 servo = gripper. Map raw → normalized [0..1].
-                gripper_norm = (vals[5] - args.gripper_closed) / grip_span
-                gripper_norm = max(0.0, min(1.0, gripper_norm))
+                # 6th SO-101 servo = gripper. Emit RAW DELTA from zero,
+                # normalized so a ~1000-raw squeeze ≈ 1.0 with default
+                # scale=3.0. follower_play in --incremental will add this
+                # to Bruce's seed gripper position.
+                raw_delta = (vals[5] - zero[5]) / 1000.0
+                gripper_delta = raw_delta * args.gripper_scale * grip_sign
 
             last_good_deg = joints_deg
-            last_good_gripper = gripper_norm
+            last_good_gripper = gripper_delta
 
             now = time.monotonic()
             if now - last_emit >= period:
-                emit(args.human, joints_deg, gripper_norm, args.no_gripper)
+                # Suppress the gripper field when |delta| is below the
+                # deadband — keeps Bruce's gripper untouched at startup
+                # (and any time SO-101 isn't being squeezed). Bruce will
+                # hold whatever physical position it's in.
+                grip_for_emit = (
+                    gripper_delta
+                    if (not args.no_gripper)
+                       and abs(gripper_delta) >= args.gripper_deadband
+                    else None
+                )
+                emit(args.human, joints_deg, grip_for_emit, args.no_gripper)
                 last_emit = now
     except KeyboardInterrupt:
         sys.stderr.write('\nstopped.\n')
 
 
 def emit(human, joints_deg, gripper, no_gripper):
+    """gripper: None → omit the field; float → include."""
     t_us = int(time.time() * 1_000_000)
     if human:
         line = f"[{t_us}] " + ' '.join(f'J{i+1}={d:+7.2f}°' for i, d in enumerate(joints_deg))
-        if not no_gripper:
-            line += f"   grip={gripper:.2f}"
+        if gripper is not None:
+            line += f"   grip={gripper:+.2f}"
+        elif not no_gripper:
+            line += "   grip= idle"
         sys.stdout.write(line + '\n')
     else:
         obj = {'t_us': t_us, 'joints_deg': joints_deg}
-        if not no_gripper:
+        if gripper is not None:
             obj['gripper'] = gripper
         sys.stdout.write(json.dumps(obj) + '\n')
     sys.stdout.flush()

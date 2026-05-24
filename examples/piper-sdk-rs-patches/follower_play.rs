@@ -249,6 +249,12 @@ where
         seed.map(|x| (x * 100.0).round() / 100.0)
     );
 
+    // Read Bruce's current gripper position so we can use it as the seed
+    // for incremental-gripper mode. Leader emits deltas; follower adds
+    // them to this seed and clamps to [0, 1].
+    let gripper_seed: f64 = observer.gripper_state().position;
+    eprintln!("seeded gripper at: {:.3}", gripper_seed);
+
     let shared = Arc::new(Mutex::new(TargetState {
         joints_deg: seed,
         gripper: None,
@@ -359,11 +365,18 @@ where
             eprintln!("send err: {e}");
         }
         if let Some(g) = gripper_cmd {
-            let g_clamped = g.clamp(0.0, 1.0);
-            // 0.5 = moderate effort. PiPER gripper saturates at ~0.696 on
-            // the OPEN end per our gripper_test findings; clamp [0,1] and
-            // trust the SDK to handle the mapping.
-            if let Err(e) = active.set_gripper(g_clamped, 0.5) {
+            // In --incremental, leader emits a DELTA on the gripper;
+            // follower adds it to the seed captured at startup so Bruce
+            // starts wherever it physically is (not slammed to 0 or 1).
+            // In absolute mode, leader emits the final 0..1 directly.
+            // 0.5 effort = moderate; PiPER gripper saturates near 0.696
+            // on the OPEN end per gripper_test findings.
+            let target_g = if args.incremental {
+                (gripper_seed + g).clamp(0.0, 1.0)
+            } else {
+                g.clamp(0.0, 1.0)
+            };
+            if let Err(e) = active.set_gripper(target_g, 0.5) {
                 eprintln!("gripper err: {e}");
             }
         }
