@@ -54,50 +54,48 @@ arms" - which is exactly the gap we filled.
 ### Patches we wrote and ship in `examples/piper-sdk-rs-patches/`
 
 1. **Firmware S-V1.8-3 CAN-ID shift** (`firmware-1.8-3-id-shift.patch`).
-   The PiPER firmware family quietly relocated the "cold" feedback
-   block by +0xFF between 1.8-2 and 1.8-3: `ID_ROBOT_STATUS`,
-   `ID_END_POSE_1..3`, `ID_JOINT_FEEDBACK_12/34/56` and
-   `ID_GRIPPER_FEEDBACK` move from `0x2A1-0x2A8` to `0x3A0-0x3A7`. The
-   hot-path joint driver IDs `0x251-0x256` and low-speed `0x261-0x266`
-   stayed put. Our `frame_scan` example produces the histogram you use
-   to decide whether to apply the patch.
+   PiPER firmware quietly relocated the "cold" feedback block by +0xFF
+   between 1.8-2 and 1.8-3: `ID_ROBOT_STATUS`, `ID_END_POSE_1..3`,
+   `ID_JOINT_FEEDBACK_12/34/56` and `ID_GRIPPER_FEEDBACK` move from
+   `0x2A1-0x2A8` to `0x3A0-0x3A7`. Hot-path joint driver IDs
+   `0x251-0x256` and low-speed `0x261-0x266` stayed put. Our
+   `frame_scan` example produces the histogram you use to decide
+   whether to apply the patch.
 
 2. **IOKit "kernel halt-state" / no-reset-on-start patch**
-   (`macos-no-reset-on-start.patch`). The upstream `GsUsbDevice::start`
+   (`macos-no-reset-on-start.patch`). Upstream `GsUsbDevice::start`
    issues `handle.reset()` (USB re-enumeration) before claiming the
-   interface. Doing that from two SDK instances simultaneously on the
-   same Mac invalidates both descriptors and both threads die. Documented
-   symptom matches the candleLight community thread
-   https://github.com/candle-usb/candleLight_fw/issues/38 . We drop the
-   up-front reset and rely on the persistent bitrate plus the MODE
-   command, which makes two-arm init succeed. (Live RX from two dongles
-   in parallel is still flaky on macOS - that is the platform-level
-   IOKit issue we route around with record-then-replay, see section 4.)
+   interface; doing that from two SDK instances simultaneously on the
+   same Mac invalidates both descriptors and both threads die (matches
+   https://github.com/candle-usb/candleLight_fw/issues/38). We drop
+   the up-front reset and rely on persistent bitrate + MODE command,
+   which makes two-arm init succeed. Live RX from two dongles in
+   parallel is still flaky on macOS - a platform IOKit issue we route
+   around with record-then-replay (section 4).
 
-3. **Type-state `Active`-drop motor-disable fix.** The Rust SDK's
-   type-state pattern auto-disables motors when the `Active` handle is
-   dropped - meaning any panic in the example mid-motion makes the arm
-   *fall*, because PiPER has no separate brakes. Our patched
-   `position_control_demo.rs`, `joint_sweep.rs`, `follower_play.rs` all
-   guard the drop path and transition Maintenance -> Standby cleanly
-   before exit so the arm holds its last pose.
+3. **Type-state `Active`-drop motor-disable fix.** The Rust SDK auto-
+   disables motors when the `Active` handle drops, so any panic mid-
+   motion makes the arm *fall* (PiPER has no separate brakes). Our
+   patched `position_control_demo.rs`, `joint_sweep.rs`, and
+   `follower_play.rs` guard the drop path and transition Maintenance
+   -> Standby cleanly so the arm holds its last pose.
 
 4. **Gripper seed re-assertion in `follower_play.rs`.** After
-   `enable_position_mode`, the firmware default opens the gripper to
-   ~70 % regardless of what was commanded one frame earlier. We assert
-   the seed gripper value at high rate for 250 ms post-enable to
-   override that bias, then continue with incremental deltas.
+   `enable_position_mode`, firmware default opens the gripper to ~70 %
+   regardless of what was commanded one frame earlier. We assert the
+   seed gripper value at high rate for 250 ms post-enable to override
+   that bias, then continue with incremental deltas.
 
 5. **Examples + binaries**: `frame_scan`, `feedback_check`,
    `exit_teach_mode` (raw CAN 0x150 EndRecord), `joint_sweep`,
    `gripper_test`, `record_pose`, `play_poses`, `leader_stream`,
-   `follower_play`. Each is a single-purpose tool, all built from one
-   `cargo build` invocation as listed in `ONBOARDING.md` section 5.
+   `follower_play` - single-purpose tools all built from one
+   `cargo build` invocation (`ONBOARDING.md` section 5).
 
-The operator attests this stack has been validated against **five
+The operator attests this stack has been validated across **five
 different physical PiPER-X arms** during the hackathon. We did not
-independently verify on five arms ourselves; what is in the repo are
-the patches, the build instructions, and the JSON wire format that made
+independently verify five arms ourselves; what is in the repo are the
+patches, the build instructions, and the JSON wire format that made
 that validation possible.
 
 ## 4. Cross-vendor bilateral teleop
@@ -219,24 +217,19 @@ window**.
 
 ## 8. What is deliberately not done yet
 
-- **Autonomous Jenga-stacking policy.** We built the platform and the
-  data pipeline. The shipped checkpoints are MLP/CNN baselines, not a
-  policy that will stack a tower.
-- **More episodes.** 6 collected, 3 of them with the overhead camera.
-  SmolVLA's own guidance is ~50 episodes minimum (25 was demonstrated
-  insufficient in their paper).
-- **Real follower observation in the dataset.** Today
-  `observation.state` is the leader's commanded pose - a proxy.
-  `follower_play --observed-log` is wired and ready; data was already
-  collected before the flag landed.
-- **Hand-eye calibration.** The depth detector
-  (`apps/depth_sensor/jenga_detect.py`) produces block poses in the
-  camera frame; converting to base frame needs `T_flange_cam` which
-  needs the leader/follower stack working end-to-end. Template lives
-  in `jonathanhawkins/jenga-stacker`.
-- **Live simultaneous two-dongle teleop on one Mac.** Documented as
-  an OS-level IOKit limitation, not a code defect; works on Linux
-  with SocketCAN and across two machines over `nc`.
+- **Autonomous Jenga-stacking policy.** Platform and data pipeline
+  done; shipped checkpoints are MLP/CNN baselines, not a tower-stacker.
+- **More episodes.** 6 collected, 3 with the overhead camera. SmolVLA
+  guidance is ~50 episodes minimum (their paper showed 25 insufficient).
+- **Real follower observation.** Today `observation.state` is the
+  leader's commanded pose - a proxy. `follower_play --observed-log` is
+  wired; data was already collected before the flag landed.
+- **Hand-eye calibration.** `apps/depth_sensor/jenga_detect.py` produces
+  block poses in the camera frame; the base-frame transform
+  `T_flange_cam` needs the leader/follower stack end-to-end.
+- **Live simultaneous two-dongle teleop on one Mac.** OS-level IOKit
+  limitation, not a code defect; works on Linux SocketCAN and across
+  two machines over `nc`.
 
 ## 9. Reusable contributions
 
@@ -244,24 +237,20 @@ For other PiPER-X / LeRobot users, the artefacts most worth lifting:
 
 - **`examples/piper-sdk-rs-patches/`** - the macOS Rust SDK patch set
   (firmware-1.8-3 ID shift, IOKit no-reset, type-state drop fix,
-  gripper seed assertion) plus 9 single-purpose example binaries. This
-  is the only macOS-native PiPER stack we are aware of.
+  gripper seed assertion) plus 9 single-purpose example binaries. The
+  only macOS-native PiPER stack we are aware of.
 - **`apps/soarm_leader/soarm_leader.py` + `follower_play.rs`** - a
-  working **cross-vendor** bilateral bridge: SO-101 Feetech serial ASCII
-  on one end, PiPER CAN on the other, JSON-lines in the middle.
-  Mappable to any leader that can emit `{t_us, joints_deg, gripper}`.
-- **`apps/dataset_builder/build_lerobot.py`** - a hand-rolled
-  jsonl + mp4 -> LeRobot v2 converter useful when you have raw episode
-  files that LeRobot's own recorder did not produce.
-- **`apps/smolvla_trainer/build_v3_dataset.py`** - the same source ->
-  LeRobot v3.0 converter built on the official
-  `LeRobotDataset.create()` API.
-- **`apps/bc_trainer/train_bc.py` and
-  `apps/smolvla_trainer/train_vision_bc.py`** - minimal, fast BC and
-  vision-BC trainers that run in single-digit-seconds on Apple Silicon
-  MPS and produce a checkpoint plus a sidecar `_meta.json` you can
-  cite directly. Useful as smoke tests before reaching for a real VLA.
-- **`ONBOARDING.md` sections 7, 9, 13, 14** - the operator's
-  troubleshooting matrix (USB stuck state, drag-teach LED semantics,
-  IOKit halt-state, depth-only-on-macOS) is the kind of writeup nobody
-  publishes and everybody needs.
+  cross-vendor bilateral bridge: SO-101 Feetech serial ASCII on one
+  end, PiPER CAN on the other, JSON-lines in the middle. Mappable to
+  any leader that can emit `{t_us, joints_deg, gripper}`.
+- **`apps/dataset_builder/build_lerobot.py`** + **`apps/smolvla_trainer/build_v3_dataset.py`** -
+  jsonl + mp4 -> LeRobot v2 (hand-rolled) and -> LeRobot v3.0 (via the
+  official `LeRobotDataset.create()` API) converters for sources the
+  upstream recorder did not produce.
+- **`apps/bc_trainer/train_bc.py` and `apps/smolvla_trainer/train_vision_bc.py`** -
+  minimal BC and vision-BC trainers that finish in single-digit seconds
+  on Apple Silicon MPS and emit a sidecar `_meta.json`. Useful smoke
+  tests before reaching for a real VLA.
+- **`ONBOARDING.md` sections 7, 9, 13, 14** - operator troubleshooting
+  matrix (USB stuck state, drag-teach LED semantics, IOKit halt-state,
+  depth-only-on-macOS).
